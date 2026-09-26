@@ -45,9 +45,13 @@ def generate_voice_clone(text: str, speaker_audio_url: str) -> str:
     )
     return output
 
-# --- Webhook Handler ---
-@app.route("/", methods=["POST"])
+# --- Webhook Handler (Supports both / and /webhook paths) ---
+@app.route("/", methods=["GET", "POST"])
+@app.route("/webhook", methods=["GET", "POST"])
 def webhook():
+    if request.method == "GET":
+        return "Bot is running!", 200
+
     data = request.get_json()
     if not data or "message" not in data:
         return "OK", 200
