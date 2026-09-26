@@ -10,7 +10,6 @@ TELEGRAM_API_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
 # Memory storage to keep track of user custom voice IDs (per chat)
 USER_VOICES = {}
-USER_STATES = {}  # Tracks if user is currently setting a voice ID
 
 def send_message(chat_id, text, show_keyboard=False):
     """Sends a text message to Telegram, optionally including main menu buttons."""
@@ -24,7 +23,7 @@ def send_message(chat_id, text, show_keyboard=False):
     if show_keyboard:
         payload["reply_markup"] = {
             "keyboard": [
-                [{"text": "📖 Recite Verse"}, {"text": "🎙️ Set Custom Voice"}],
+                [{"text": "📖 Recite Verse"}, {"text": "🎙️ Clone My Voice"}],
                 [{"text": "ℹ️ Help"}]
             ],
             "resize_keyboard": True
@@ -38,6 +37,26 @@ def send_audio(chat_id, audio_bytes):
     files = {"voice": ("recitation.mp3", audio_bytes, "audio/mpeg")}
     payload = {"chat_id": chat_id}
     requests.post(url, data=payload, files=files)
+
+def create_fish_voice_model(voice_bytes, chat_id):
+    """Uploads recorded voice audio to Fish Audio to create a voice model."""
+    url = "https://api.fish.audio/v1/model"
+    headers = {
+        "Authorization": f"Bearer {FISH_AUDIO_API_KEY}"
+    }
+    data = {
+        "title": f"User_{chat_id}_Voice",
+        "type": "tts",
+        "train_mode": "fast"
+    }
+    files = {
+        "voices": ("recording.ogg", voice_bytes, "audio/ogg")
+    }
+    
+    res = requests.post(url, headers=headers, data=data, files=files)
+    if res.status_code in [200, 201]:
+        return res.json().get("_id") or res.json().get("id")
+    return None
 
 @app.route("/", methods=["GET"])
 def home():
@@ -59,21 +78,54 @@ def webhook():
     if not data or "message" not in data:
         return jsonify({"status": "ignored"}), 200
 
-    chat_id = data["message"]["chat"]["id"]
-    text = data["message"].get("text", "").strip()
+    message = data["message"]
+    chat_id = message["chat"]["id"]
+    text = message.get("text", "").strip()
 
-    # 1. Handle /start command or Main Menu navigation
+    # 1. Handle Voice Messages (In-Telegram Voice Cloning)
+    if "voice" in message:
+        send_message(chat_id, "🎙️ Processing your voice recording and creating your custom AI voice model... Please wait a moment.")
+        
+        # Get voice file path from Telegram
+        file_id = message["voice"]["file_id"]
+        file_info = requests.get(f"{TELEGRAM_API_URL}/getFile?file_id={file_id}").json()
+        
+        if file_info.get("ok"):
+            file_path = file_info["result"]["file_path"]
+            voice_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}"
+            voice_bytes = requests.get(voice_url).content
+
+            # Create model on Fish Audio
+            model_id = create_fish_voice_model(voice_bytes, chat_id)
+            if model_id:
+                USER_VOICES[chat_id] = model_id
+                send_message(
+                    chat_id, 
+                    "✅ **Voice successfully cloned!**\n\n"
+                    "All future Quran recitations will now be generated in your cloned voice! "
+                    "Send a verse like `1:1` or `2:255` to test it.", 
+                    show_keyboard=True
+                )
+            else:
+                send_message(
+                    chat_id, 
+                    "⚠️ Voice cloning failed on Fish Audio. Make sure your account has active credits and try recording a clearer 15-30 second audio clip.",
+                    show_keyboard=True
+                )
+        return jsonify({"status": "ok"}), 200
+
+    # 2. Handle /start command or Main Menu navigation
     if text in ["/start", "main menu"]:
-        USER_STATES[chat_id] = None
         welcome_msg = (
             "Assalamu Alaikum! 🌙\n\n"
             "Welcome to the **Quran Recitation & Voice Cloning Bot**.\n\n"
-            "Select an option below or directly send a verse number in `Surah:Ayah` format (e.g., `1:1` or `2:255`)."
+            "• **To clone your voice:** Hold the microphone icon in Telegram and record a clear 15–30 second voice message.\n"
+            "• **To get recitation:** Send a verse number in `Surah:Ayah` format (e.g., `1:1` or `2:255`)."
         )
         send_message(chat_id, welcome_msg, show_keyboard=True)
         return jsonify({"status": "ok"}), 200
 
-    # 2. Handle Button Menu Clicks
+    # 3. Handle Button Menu Clicks
     if text == "📖 Recite Verse":
         send_message(
             chat_id, 
@@ -83,15 +135,13 @@ def webhook():
         )
         return jsonify({"status": "ok"}), 200
 
-    if text == "🎙️ Set Custom Voice":
-        USER_STATES[chat_id] = "awaiting_voice_id"
-        current_voice = USER_VOICES.get(chat_id, "Default Voice")
+    if text == "🎙️ Clone My Voice":
+        current_voice = "Custom Cloned Voice" if chat_id in USER_VOICES else "Default Standard Voice"
         msg = (
-            f"**Current Voice Setting:** `{current_voice}`\n\n"
-            "To use your cloned voice or a custom model from Fish Audio:\n"
-            "1. Go to [Fish Audio](https://fish.audio) and copy your Model/Voice ID.\n"
-            "2. Send the **Voice Model ID** as a reply to this message.\n\n"
-            "*(Send `default` anytime to reset to the standard voice).* "
+            f"**Current Active Voice:** `{current_voice}`\n\n"
+            "🎙️ **How to clone your voice:**\n"
+            "Simply hold the microphone button below and send me a **15–30 second voice recording** reading any text clearly.\n\n"
+            "*(Send `default` anytime to reset back to the standard voice).* "
         )
         send_message(chat_id, msg)
         return jsonify({"status": "ok"}), 200
@@ -100,24 +150,19 @@ def webhook():
         help_msg = (
             "📌 **Bot Commands & Usage:**\n\n"
             "• **Get Recitation:** Send `Surah:Ayah` (e.g. `112:1`).\n"
-            "• **Voice Cloning:** Tap `🎙️ Set Custom Voice` to use your cloned Fish Audio voice.\n"
-            "• **Format:** Arabic Uthmani text rendered directly into spoken audio."
+            "• **Clone Voice:** Record a voice note directly in Telegram!\n"
+            "• **Reset Voice:** Send `default` to return to the standard reciter."
         )
         send_message(chat_id, help_msg, show_keyboard=True)
         return jsonify({"status": "ok"}), 200
 
-    # 3. Handle Voice ID Input State
-    if USER_STATES.get(chat_id) == "awaiting_voice_id":
-        USER_STATES[chat_id] = None
-        if text.lower() == "default":
-            USER_VOICES.pop(chat_id, None)
-            send_message(chat_id, "✅ Voice reset to default standard model.", show_keyboard=True)
-        else:
-            USER_VOICES[chat_id] = text
-            send_message(chat_id, f"✅ Voice Model set to: `{text}`!\nFuture recitations will use this voice model.", show_keyboard=True)
+    # 4. Handle Voice Reset
+    if text.lower() == "default":
+        USER_VOICES.pop(chat_id, None)
+        send_message(chat_id, "✅ Voice reset back to default standard model.", show_keyboard=True)
         return jsonify({"status": "ok"}), 200
 
-    # 4. Handle Surah:Ayah Verse Generation Requests
+    # 5. Handle Surah:Ayah Verse Generation Requests
     if ":" in text:
         try:
             surah, ayah = text.split(":")
@@ -145,7 +190,7 @@ def webhook():
                 "format": "mp3"
             }
 
-            # Attach custom reference/voice ID if user set one
+            # Use custom voice model ID if user recorded one
             if chat_id in USER_VOICES:
                 fish_payload["reference_id"] = USER_VOICES[chat_id]
 
@@ -155,7 +200,7 @@ def webhook():
                 send_message(
                     chat_id, 
                     f"⚠️ Voice generation failed (Fish Audio Status Code: {fish_res.status_code}). "
-                    "If you set a custom Voice ID, verify that it is valid."
+                    "Please verify that your developer Fish Audio account has active credits."
                 )
                 return jsonify({"status": "fish_audio_error"}), 200
 
