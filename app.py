@@ -5,16 +5,28 @@ import replicate
 
 app = Flask(__name__)
 
-# --- Environment Variables (Only BOT_TOKEN & REPLICATE_API_TOKEN required) ---
+# --- Environment Variables ---
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
 # Temporary memory storage for voice samples
 user_voices = {}
 
+# --- Bottom Menu Keyboard Definition ---
+MAIN_KEYBOARD = {
+    "keyboard": [
+        [{"text": "📖 Recite Verse"}, {"text": "🎙️ Clone My Voice"}],
+        [{"text": "ℹ️ Help"}]
+    ],
+    "resize_keyboard": True
+}
+
 # --- Helper Functions ---
-def send_message(chat_id: int, text: str):
-    requests.post(f"{TELEGRAM_API}/sendMessage", json={"chat_id": chat_id, "text": text})
+def send_message(chat_id: int, text: str, reply_markup=None):
+    payload = {"chat_id": chat_id, "text": text}
+    if reply_markup:
+        payload["reply_markup"] = reply_markup
+    requests.post(f"{TELEGRAM_API}/sendMessage", json=payload)
 
 def send_voice(chat_id: int, voice_url: str):
     requests.post(f"{TELEGRAM_API}/sendVoice", json={"chat_id": chat_id, "voice": voice_url})
@@ -32,7 +44,6 @@ def fetch_quran_text(surah: int, ayah: int) -> str:
     return None
 
 def generate_voice_clone(text: str, speaker_audio_url: str) -> str:
-    # Trailing punctuation creates natural breathing pauses
     formatted_text = f"{text}."
     output = replicate.run(
         "lucataco/xtts-v2:682050901e3895e3489b03f0b2f5b82e21e64903e62f025e1d528b9f5d134d1b",
@@ -40,12 +51,12 @@ def generate_voice_clone(text: str, speaker_audio_url: str) -> str:
             "text": formatted_text,
             "speaker": speaker_audio_url,
             "language": "ar",
-            "speed": 0.82  # Slower pace for reciter cadence
+            "speed": 0.82
         }
     )
     return output
 
-# --- Webhook Handler (Supports both / and /webhook paths) ---
+# --- Webhook Handler ---
 @app.route("/", methods=["GET", "POST"])
 @app.route("/webhook", methods=["GET", "POST"])
 def webhook():
@@ -74,15 +85,47 @@ def webhook():
             "• Receive your custom audio clip!\n\n"
             "Upload your voice sample anytime below to begin."
         )
-        send_message(chat_id, start_message)
+        send_message(chat_id, start_message, reply_markup=MAIN_KEYBOARD)
         return "OK", 200
 
-    # Save voice note URL in temporary memory
+    # Handle Menu Button Taps
+    if text == "🎙️ Clone My Voice":
+        send_message(
+            chat_id, 
+            "🎙️ How to clone your voice:\n\n"
+            "Hold the microphone button below and record a 10–15 second voice message reading any text clearly.",
+            reply_markup=MAIN_KEYBOARD
+        )
+        return "OK", 200
+
+    if text == "📖 Recite Verse":
+        send_message(
+            chat_id, 
+            "📖 To generate a verse, send its Surah and Ayah numbers separated by a colon.\n\n"
+            "Examples:\n"
+            "• `1:1` (Surah Al-Fatiha, Verse 1)\n"
+            "• `2:255` (Ayat al-Kursi)",
+            reply_markup=MAIN_KEYBOARD
+        )
+        return "OK", 200
+
+    if text == "ℹ️ Help":
+        send_message(
+            chat_id,
+            "ℹ️ TilawaAiBot Help:\n\n"
+            "1. Record a 10-15s voice note to save your voice.\n"
+            "2. Send `Surah:Ayah` (e.g. `112:1`) to generate recitation.\n"
+            "3. Send a new voice note anytime to update your voice sample.",
+            reply_markup=MAIN_KEYBOARD
+        )
+        return "OK", 200
+
+    # Save voice note URL
     if "voice" in msg:
         file_id = msg["voice"]["file_id"]
         voice_url = get_telegram_file_url(file_id)
         user_voices[user_id] = voice_url
-        send_message(chat_id, "Voice saved! Send a verse like `1:1` to hear it recited.")
+        send_message(chat_id, "✅ Voice saved successfully! Send a verse like `1:1` or `2:255` to test it.", reply_markup=MAIN_KEYBOARD)
         return "OK", 200
 
     # Handle verse request (e.g. 1:1 or 2:255)
@@ -92,7 +135,7 @@ def webhook():
             user_voice_url = user_voices.get(user_id)
 
             if not user_voice_url:
-                send_message(chat_id, "Please upload a voice note first so I can clone your voice!")
+                send_message(chat_id, "Please upload a voice note first by tapping '🎙️ Clone My Voice'!", reply_markup=MAIN_KEYBOARD)
                 return "OK", 200
 
             send_message(chat_id, f"Generating recitation for {surah}:{ayah}...")
