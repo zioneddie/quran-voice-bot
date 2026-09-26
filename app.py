@@ -9,7 +9,7 @@ app = Flask(__name__)
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
-# Temporary memory storage for voice samples during active session
+# Temporary memory storage for voice samples
 user_voices = {}
 
 # --- Helper Functions ---
@@ -40,7 +40,7 @@ def generate_voice_clone(text: str, speaker_audio_url: str) -> str:
             "text": formatted_text,
             "speaker": speaker_audio_url,
             "language": "ar",
-            "speed": 0.82  # Slower pace for reciter cadence (default is 1.0)
+            "speed": 0.82  # Slower pace for reciter cadence
         }
     )
     return output
@@ -57,13 +57,20 @@ def webhook():
     user_id = msg["from"]["id"]
     text = msg.get("text", "").strip()
 
+    # Handle /start Command
     if text == "/start":
-        send_message(
-            chat_id,
-            "Welcome to TilawaAiabot!\n\n"
-            "1. Send a voice message (15-30 seconds) to clone your voice.\n"
-            "2. Send a verse request like 1:1 or 2:255 to test it!"
+        start_message = (
+            "Assalamu Alaikum! Welcome to the TilawaAiBot🌙\n\n"
+            "Experience your voice applied to authentic Qur'an recitations with proper Tajweed rules.\n\n"
+            "⚠️ Disclaimer: This is an AI audio visualization and educational tool. "
+            "It is meant for listening and learning purposes only and does not replace actual physical Qur'an recitation.\n\n"
+            "How to get started:\n"
+            "• Send a clear 10–15 second voice recording.\n"
+            "• Select the verse you want to hear (e.g., 1:1 or 2:255).\n"
+            "• Receive your custom audio clip!\n\n"
+            "Upload your voice sample anytime below to begin."
         )
+        send_message(chat_id, start_message)
         return "OK", 200
 
     # Save voice note URL in temporary memory
@@ -71,17 +78,17 @@ def webhook():
         file_id = msg["voice"]["file_id"]
         voice_url = get_telegram_file_url(file_id)
         user_voices[user_id] = voice_url
-        send_message(chat_id, "Voice saved! Send a verse like `1:1` to hear it recited with slower pacing.")
+        send_message(chat_id, "Voice saved! Send a verse like `1:1` to hear it recited.")
         return "OK", 200
 
-    # Handle verse request
+    # Handle verse request (e.g. 1:1 or 2:255)
     if ":" in text:
         try:
             surah, ayah = map(int, text.split(":"))
             user_voice_url = user_voices.get(user_id)
 
             if not user_voice_url:
-                send_message(chat_id, "Please send a voice note first so I can clone your voice!")
+                send_message(chat_id, "Please upload a voice note first so I can clone your voice!")
                 return "OK", 200
 
             send_message(chat_id, f"Generating recitation for {surah}:{ayah}...")
