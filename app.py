@@ -8,11 +8,22 @@ import replicate
 app = Flask(__name__)
 
 # --- Environment Variables ---
-BOT_TOKEN = os.environ.get("BOT_TOKEN")
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "").strip('"\' ')
 TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
-UPSTASH_URL = os.environ.get("UPSTASH_REDIS_REST_URL", "").strip('"\' ')
-UPSTASH_TOKEN = os.environ.get("UPSTASH_REDIS_REST_TOKEN", "").strip('"\' ')
+# Checks all common variable names for Upstash REST URL
+UPSTASH_URL = (
+    os.environ.get("UPSTASH_REDIS_REST_URL") or 
+    os.environ.get("UPSTASH_URL") or 
+    os.environ.get("REDIS_URL") or ""
+).strip('"\' ')
+
+# Checks all common variable names for Upstash REST Token
+UPSTASH_TOKEN = (
+    os.environ.get("UPSTASH_REDIS_REST_TOKEN") or 
+    os.environ.get("UPSTASH_TOKEN") or 
+    os.environ.get("REDIS_TOKEN") or ""
+).strip('"\' ')
 
 # --- Limits & Rules ---
 MAX_CHARS = 400       # Maximum text length per request
@@ -44,44 +55,51 @@ def get_telegram_file_url(file_id: str) -> str:
         return f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}"
     return None
 
-# --- Direct Upstash HTTP REST Helper ---
+# --- Direct Upstash REST Helper with Diagnostics ---
 def redis_cmd(*args):
     """Executes Redis commands directly over Upstash REST API using requests."""
-    if not UPSTASH_URL or not UPSTASH_TOKEN:
-        return None
+    if not UPSTASH_URL:
+        return False, "Missing URL env var on Render (add UPSTASH_REDIS_REST_URL)"
+    if not UPSTASH_TOKEN:
+        return False, "Missing TOKEN env var on Render (add UPSTASH_REDIS_REST_TOKEN)"
+
     try:
         url = UPSTASH_URL.rstrip('/')
         headers = {"Authorization": f"Bearer {UPSTASH_TOKEN}"}
         res = requests.post(url, headers=headers, json=list(args), timeout=5)
+        
         if res.status_code == 200:
-            return res.json().get("result")
+            return True, res.json().get("result")
+        else:
+            return False, f"Upstash HTTP {res.status_code}: {res.text}"
     except Exception as e:
-        print(f"Upstash REST Error: {e}")
-    return None
+        return False, f"Connection error: {str(e)}"
 
 def get_user_voice(user_id: int) -> str:
-    val = redis_cmd("GET", f"voice:{user_id}")
-    return str(val) if val else None
+    success, val = redis_cmd("GET", f"voice:{user_id}")
+    return str(val) if (success and val) else None
 
-def save_user_voice(user_id: int, voice_url: str) -> bool:
-    res = redis_cmd("SET", f"voice:{user_id}", voice_url)
-    return res == "OK"
+def save_user_voice(user_id: int, voice_url: str) -> tuple:
+    success, res = redis_cmd("SET", f"voice:{user_id}", voice_url)
+    if success and res == "OK":
+        return True, "OK"
+    return False, str(res)
 
 def check_and_increment_quota(user_id: int) -> tuple:
     today_str = datetime.utcnow().strftime("%Y-%m-%d")
     key = f"usage:{user_id}:{today_str}"
     
-    current = redis_cmd("GET", key)
-    current_count = int(current) if current else 0
+    success, current = redis_cmd("GET", key)
+    current_count = int(current) if (success and current) else 0
 
     if current_count >= DAILY_LIMIT:
         return False, current_count
 
-    new_count = redis_cmd("INCR", key)
-    if new_count == 1 or new_count == "1":
+    success_incr, new_count = redis_cmd("INCR", key)
+    if success_incr and (new_count == 1 or new_count == "1"):
         redis_cmd("EXPIRE", key, 172800)
         
-    return True, int(new_count) if new_count else 1
+    return True, int(new_count) if (success_incr and new_count) else 1
 
 # --- Voice Generation Call ---
 def generate_voice_narration(text: str, speaker_audio_url: str) -> str:
@@ -165,8 +183,8 @@ def webhook():
             voice_status = "✅ Active Voice Clone Found" if user_voice else "❌ No Voice Saved Yet"
             
             today_str = datetime.utcnow().strftime("%Y-%m-%d")
-            used_val = redis_cmd("GET", f"usage:{user_id}:{today_str}")
-            current_used = int(used_val) if used_val else 0
+            success, used_val = redis_cmd("GET", f"usage:{user_id}:{today_str}")
+            current_used = int(used_val) if (success and used_val) else 0
             remaining = max(0, DAILY_LIMIT - current_used)
 
             status_msg = (
@@ -195,7 +213,7 @@ def webhook():
             if file_id:
                 voice_url = get_telegram_file_url(file_id)
                 if voice_url:
-                    saved = save_user_voice(user_id, voice_url)
+                    saved, err_details = save_user_voice(user_id, voice_url)
                     if saved:
                         send_message(
                             chat_id,
@@ -205,7 +223,7 @@ def webhook():
                     else:
                         send_message(
                             chat_id,
-                            "⚠️ Voice received, but failed to write to Redis database. Check Redis environment variables on Render.",
+                            f"⚠️ Database Error:\n{err_details}",
                             reply_markup=MAIN_KEYBOARD
                         )
                 else:
@@ -256,4 +274,4 @@ def webhook():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
-        
+            
