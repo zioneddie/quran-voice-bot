@@ -45,8 +45,9 @@ def fetch_quran_text(surah: int, ayah: int) -> str:
 
 def generate_voice_clone(text: str, speaker_audio_url: str) -> str:
     formatted_text = f"{text}."
+    # Calling "lucataco/xtts-v2" directly automatically uses the latest version
     output = replicate.run(
-        "lucataco/xtts-v2:682050901e3895e3489b03f0b2f5b82e21e64903e62f025e1d528b9f5d134d1b",
+        "lucataco/xtts-v2",
         input={
             "text": formatted_text,
             "speaker": speaker_audio_url,
