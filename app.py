@@ -75,12 +75,15 @@ def get_user_voice(user_id: int) -> str:
         print(f"Error getting user voice: {e}")
         return None
 
-def save_user_voice(user_id: int, voice_url: str):
+def save_user_voice(user_id: int, voice_url: str) -> bool:
     if redis and voice_url:
         try:
             redis.set(f"voice:{user_id}", voice_url)
+            return True
         except Exception as e:
             print(f"Error saving user voice: {e}")
+            return False
+    return False
 
 def check_and_increment_quota(user_id: int) -> tuple:
     if not redis:
@@ -134,7 +137,8 @@ def webhook():
         return "StoryVoice AI Studio is online!", 200
 
     try:
-        data = request.get_json()
+        # silent=True prevents 415 Unsupported Media Type error on non-JSON requests
+        data = request.get_json(silent=True)
         if not data or "message" not in data:
             return "OK", 200
 
@@ -220,14 +224,21 @@ def webhook():
             if file_id:
                 voice_url = get_telegram_file_url(file_id)
                 if voice_url:
-                    save_user_voice(user_id, voice_url)
-                    send_message(
-                        chat_id,
-                        "✅ Voice profile saved permanently! Send any story or text message now to generate a custom narration.",
-                        reply_markup=MAIN_KEYBOARD
-                    )
+                    saved = save_user_voice(user_id, voice_url)
+                    if saved:
+                        send_message(
+                            chat_id,
+                            "✅ Voice profile saved permanently! Send any story or text message now to generate a custom narration.",
+                            reply_markup=MAIN_KEYBOARD
+                        )
+                    else:
+                        send_message(
+                            chat_id,
+                            "⚠️ Voice received, but failed to write to Redis database. Check Redis setup.",
+                            reply_markup=MAIN_KEYBOARD
+                        )
                 else:
-                    send_message(chat_id, "⚠️ Couldn't retrieve voice file from Telegram. Please try sending a direct voice recording.", reply_markup=MAIN_KEYBOARD)
+                    send_message(chat_id, "⚠️ Couldn't retrieve voice file from Telegram.", reply_markup=MAIN_KEYBOARD)
             return "OK", 200
 
         # --- Process Plain Text Script ---
@@ -274,4 +285,4 @@ def webhook():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
-        
+           
