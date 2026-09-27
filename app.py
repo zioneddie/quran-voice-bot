@@ -1,5 +1,6 @@
 import os
 import requests
+import threading
 from flask import Flask, request
 import replicate
 
@@ -43,34 +44,36 @@ def fetch_quran_text(surah: int, ayah: int) -> str:
         return res["data"]["text"]
     return None
 
-def get_latest_xtts_version() -> str:
-    """Dynamically fetches the latest XTTS-v2 model version to prevent 404/422 errors."""
-    try:
-        model = replicate.models.get("lucataco/xtts-v2")
-        if model and model.latest_version:
-            return f"lucataco/xtts-v2:{model.latest_version.id}"
-    except Exception:
-        pass
-    # Fallback to verified active version hash
-    return "lucataco/xtts-v2:684bc3855b37866c0c65add2ff39c78f3dea3f4ff103a436465326e0f438d55e"
-
 def generate_voice_clone(text: str, speaker_audio_url: str) -> str:
-    # Trailing punctuation creates natural breathing pauses for Tajweed rhythm
     formatted_text = f"{text}."
-    model_version = get_latest_xtts_version()
-    
     output = replicate.run(
-        model_version,
+        "lucataco/xtts-v2:684bc3855b37866c0c65add2ff39c78f3dea3f4ff103a436465326e0f438d55e",
         input={
             "text": formatted_text,
             "speaker": speaker_audio_url,
             "language": "ar",
-            "speed": 0.82  # Optimal reciter speed
+            "speed": 0.82
         }
     )
+    # Ensure cleaner string URL extraction across all replicate library versions
+    if isinstance(output, list):
+        return str(output[0])
     return str(output)
 
-# --- Webhook Handler (Supports both / and /webhook routes) ---
+# --- Background Worker Function ---
+def process_and_send_recitation(chat_id: int, surah: int, ayah: int, user_voice_url: str):
+    try:
+        quran_text = fetch_quran_text(surah, ayah)
+        if not quran_text:
+            send_message(chat_id, "Verse not found. Please check Surah and Ayah numbers.", reply_markup=MAIN_KEYBOARD)
+            return
+
+        audio_url = generate_voice_clone(quran_text, user_voice_url)
+        send_voice(chat_id, audio_url)
+    except Exception as e:
+        send_message(chat_id, f"Error generating audio: {str(e)}", reply_markup=MAIN_KEYBOARD)
+
+# --- Webhook Handler ---
 @app.route("/", methods=["GET", "POST"])
 @app.route("/webhook", methods=["GET", "POST"])
 def webhook():
@@ -153,17 +156,15 @@ def webhook():
                 return "OK", 200
 
             send_message(chat_id, f"Generating recitation for {surah}:{ayah}...")
-            quran_text = fetch_quran_text(surah, ayah)
-
-            if not quran_text:
-                send_message(chat_id, "Verse not found. Please check Surah and Ayah numbers.", reply_markup=MAIN_KEYBOARD)
-                return "OK", 200
-
-            audio_url = generate_voice_clone(quran_text, user_voice_url)
-            send_voice(chat_id, audio_url)
+            
+            # Run generation in a background thread to prevent Webhook timeouts
+            threading.Thread(
+                target=process_and_send_recitation, 
+                args=(chat_id, surah, ayah, user_voice_url)
+            ).start()
 
         except Exception as e:
-            send_message(chat_id, f"Error generating audio: {str(e)}", reply_markup=MAIN_KEYBOARD)
+            send_message(chat_id, f"Error parsing verse request: {str(e)}", reply_markup=MAIN_KEYBOARD)
 
         return "OK", 200
 
