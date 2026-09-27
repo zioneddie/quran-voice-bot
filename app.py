@@ -5,34 +5,14 @@ from datetime import datetime
 from flask import Flask, request
 import replicate
 
-# Safely import Redis
-try:
-    from upstash_redis import Redis
-except ImportError:
-    Redis = None
-
 app = Flask(__name__)
 
 # --- Environment Variables ---
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
-UPSTASH_URL = os.environ.get("UPSTASH_REDIS_REST_URL")
-UPSTASH_TOKEN = os.environ.get("UPSTASH_REDIS_REST_TOKEN")
-
-if UPSTASH_URL:
-    UPSTASH_URL = UPSTASH_URL.strip('"\' ')
-if UPSTASH_TOKEN:
-    UPSTASH_TOKEN = UPSTASH_TOKEN.strip('"\' ')
-
-# --- Safe Redis Client ---
-redis = None
-if Redis and UPSTASH_URL and UPSTASH_TOKEN:
-    try:
-        redis = Redis(url=UPSTASH_URL, token=UPSTASH_TOKEN)
-    except Exception as e:
-        print(f"Redis initialization error: {e}")
-        redis = None
+UPSTASH_URL = os.environ.get("UPSTASH_REDIS_REST_URL", "").strip('"\' ')
+UPSTASH_TOKEN = os.environ.get("UPSTASH_REDIS_REST_TOKEN", "").strip('"\' ')
 
 # --- Limits & Rules ---
 MAX_CHARS = 400       # Maximum text length per request
@@ -47,7 +27,7 @@ MAIN_KEYBOARD = {
     "resize_keyboard": True
 }
 
-# --- Helper Functions ---
+# --- Telegram Helper Functions ---
 def send_message(chat_id: int, text: str, reply_markup=None):
     payload = {"chat_id": chat_id, "text": text}
     if reply_markup:
@@ -64,47 +44,44 @@ def get_telegram_file_url(file_id: str) -> str:
         return f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}"
     return None
 
-# --- Database Storage Helpers ---
-def get_user_voice(user_id: int) -> str:
-    if not redis:
+# --- Direct Upstash HTTP REST Helper ---
+def redis_cmd(*args):
+    """Executes Redis commands directly over Upstash REST API using requests."""
+    if not UPSTASH_URL or not UPSTASH_TOKEN:
         return None
     try:
-        val = redis.get(f"voice:{user_id}")
-        return str(val) if val else None
+        url = UPSTASH_URL.rstrip('/')
+        headers = {"Authorization": f"Bearer {UPSTASH_TOKEN}"}
+        res = requests.post(url, headers=headers, json=list(args), timeout=5)
+        if res.status_code == 200:
+            return res.json().get("result")
     except Exception as e:
-        print(f"Error getting user voice: {e}")
-        return None
+        print(f"Upstash REST Error: {e}")
+    return None
+
+def get_user_voice(user_id: int) -> str:
+    val = redis_cmd("GET", f"voice:{user_id}")
+    return str(val) if val else None
 
 def save_user_voice(user_id: int, voice_url: str) -> bool:
-    if redis and voice_url:
-        try:
-            redis.set(f"voice:{user_id}", voice_url)
-            return True
-        except Exception as e:
-            print(f"Error saving user voice: {e}")
-            return False
-    return False
+    res = redis_cmd("SET", f"voice:{user_id}", voice_url)
+    return res == "OK"
 
 def check_and_increment_quota(user_id: int) -> tuple:
-    if not redis:
-        return True, 1
-    try:
-        today_str = datetime.utcnow().strftime("%Y-%m-%d")
-        key = f"usage:{user_id}:{today_str}"
+    today_str = datetime.utcnow().strftime("%Y-%m-%d")
+    key = f"usage:{user_id}:{today_str}"
+    
+    current = redis_cmd("GET", key)
+    current_count = int(current) if current else 0
+
+    if current_count >= DAILY_LIMIT:
+        return False, current_count
+
+    new_count = redis_cmd("INCR", key)
+    if new_count == 1 or new_count == "1":
+        redis_cmd("EXPIRE", key, 172800)
         
-        current_count = redis.get(key)
-        current_count = int(current_count) if current_count else 0
-
-        if current_count >= DAILY_LIMIT:
-            return False, current_count
-
-        new_count = redis.incr(key)
-        if new_count == 1:
-            redis.expire(key, 172800)
-        return True, new_count
-    except Exception as e:
-        print(f"Error checking quota: {e}")
-        return True, 1
+    return True, int(new_count) if new_count else 1
 
 # --- Voice Generation Call ---
 def generate_voice_narration(text: str, speaker_audio_url: str) -> str:
@@ -137,7 +114,6 @@ def webhook():
         return "StoryVoice AI Studio is online!", 200
 
     try:
-        # silent=True prevents 415 Unsupported Media Type error on non-JSON requests
         data = request.get_json(silent=True)
         if not data or "message" not in data:
             return "OK", 200
@@ -189,13 +165,8 @@ def webhook():
             voice_status = "✅ Active Voice Clone Found" if user_voice else "❌ No Voice Saved Yet"
             
             today_str = datetime.utcnow().strftime("%Y-%m-%d")
-            current_used = 0
-            if redis:
-                try:
-                    val = redis.get(f"usage:{user_id}:{today_str}")
-                    current_used = int(val) if val else 0
-                except Exception:
-                    pass
+            used_val = redis_cmd("GET", f"usage:{user_id}:{today_str}")
+            current_used = int(used_val) if used_val else 0
             remaining = max(0, DAILY_LIMIT - current_used)
 
             status_msg = (
@@ -234,7 +205,7 @@ def webhook():
                     else:
                         send_message(
                             chat_id,
-                            "⚠️ Voice received, but failed to write to Redis database. Check Redis setup.",
+                            "⚠️ Voice received, but failed to write to Redis database. Check Redis environment variables on Render.",
                             reply_markup=MAIN_KEYBOARD
                         )
                 else:
@@ -285,4 +256,4 @@ def webhook():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
-           
+        
