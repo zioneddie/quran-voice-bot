@@ -43,21 +43,34 @@ def fetch_quran_text(surah: int, ayah: int) -> str:
         return res["data"]["text"]
     return None
 
+def get_latest_xtts_version() -> str:
+    """Dynamically fetches the latest XTTS-v2 model version to prevent 404/422 errors."""
+    try:
+        model = replicate.models.get("lucataco/xtts-v2")
+        if model and model.latest_version:
+            return f"lucataco/xtts-v2:{model.latest_version.id}"
+    except Exception:
+        pass
+    # Fallback to verified active version hash
+    return "lucataco/xtts-v2:684bc3855b37866c0c65add2ff39c78f3dea3f4ff103a436465326e0f438d55e"
+
 def generate_voice_clone(text: str, speaker_audio_url: str) -> str:
+    # Trailing punctuation creates natural breathing pauses for Tajweed rhythm
     formatted_text = f"{text}."
-    # Calling "lucataco/xtts-v2" directly automatically uses the latest version
+    model_version = get_latest_xtts_version()
+    
     output = replicate.run(
-        "lucataco/xtts-v2",
+        model_version,
         input={
             "text": formatted_text,
             "speaker": speaker_audio_url,
             "language": "ar",
-            "speed": 0.82
+            "speed": 0.82  # Optimal reciter speed
         }
     )
-    return output
+    return str(output)
 
-# --- Webhook Handler ---
+# --- Webhook Handler (Supports both / and /webhook routes) ---
 @app.route("/", methods=["GET", "POST"])
 @app.route("/webhook", methods=["GET", "POST"])
 def webhook():
@@ -143,14 +156,14 @@ def webhook():
             quran_text = fetch_quran_text(surah, ayah)
 
             if not quran_text:
-                send_message(chat_id, "Verse not found. Please check Surah and Ayah numbers.")
+                send_message(chat_id, "Verse not found. Please check Surah and Ayah numbers.", reply_markup=MAIN_KEYBOARD)
                 return "OK", 200
 
             audio_url = generate_voice_clone(quran_text, user_voice_url)
             send_voice(chat_id, audio_url)
 
         except Exception as e:
-            send_message(chat_id, f"Error generating audio: {str(e)}")
+            send_message(chat_id, f"Error generating audio: {str(e)}", reply_markup=MAIN_KEYBOARD)
 
         return "OK", 200
 
