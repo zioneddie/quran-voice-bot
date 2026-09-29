@@ -1,4 +1,5 @@
 import os
+import re
 import requests
 import threading
 from datetime import datetime
@@ -52,6 +53,28 @@ BUY_KEYBOARD = {
         [{"text": "⭐ 100 Credits — 100 Stars", "pay": True}]
     ]
 }
+
+# --- Text Sanitization & Anti-Hallucination ---
+def sanitize_and_fix_script(text: str) -> str:
+    """
+    Cleans script to prevent XTTS-v2 model hallucinations and end-of-sentence gibberish.
+    Forces ending punctuation so the model cleanly triggers its end-of-sequence token.
+    """
+    if not text:
+        return ""
+    text = text.strip()
+    
+    # Remove emojis and unsupported special characters that confuse the AI tokenizer
+    text = re.sub(r'[^\w\s.,!?\'"-]', '', text)
+    
+    # Collapse multiple spaces or newlines into a single space
+    text = re.sub(r'\s+', ' ', text)
+    
+    # Force proper end punctuation if missing
+    if text and not text.endswith(('.', '!', '?')):
+        text += '.'
+        
+    return text
 
 # --- Telegram Helper Functions ---
 def send_message(chat_id: int, text: str, reply_markup=None):
@@ -164,10 +187,13 @@ def check_and_increment_quota(user_id: int) -> tuple:
 
 # --- Voice Generation ---
 def generate_voice_narration(text: str, speaker_audio_url: str) -> str:
+    # Clean text to stop end-of-sentence gibberish
+    clean_text = sanitize_and_fix_script(text)
+    
     output = replicate.run(
         "lucataco/xtts-v2:684bc3855b37866c0c65add2ff39c78f3dea3f4ff103a436465326e0f438d55e",
         input={
-            "text": text,
+            "text": clean_text,
             "speaker": speaker_audio_url,
             "language": "en",
             "speed": 1.0
@@ -264,10 +290,10 @@ def webhook():
             if text == "🎙️ Clone My Voice":
                 send_message(
                     chat_id,
-                    "🎙️️ Voice Cloning & Updating:\n\n"
+                    "🎙 Voice Cloning & Updating:\n\n"
                     "1. Find a quiet room with minimal background noise.\n"
                     "2. Record a 10–15 second voice note speaking naturally.\n"
-                    "3. Send it here to save or update your voice clone permanently.\n\n"
+                    "3. Stop the recording immediately after speaking so there's no trailing noise!\n\n"
                     "💡 Sending a new voice note at any time will instantly replace your old cloned voice!",
                     reply_markup=MAIN_KEYBOARD
                 )
@@ -277,9 +303,9 @@ def webhook():
                 send_message(
                     chat_id,
                     "📝 AI Voiceover Tips:\n\n"
+                    "• Always end sentences with periods (.) or exclamation marks (!) for clean speech pauses.\n"
                     "• Use commas for natural pauses.\n"
-                    "• Use periods or exclamation marks for emphasis.\n"
-                    "• Keep paragraphs under 400 characters for optimal pacing.",
+                    "• Keep paragraphs under 400 characters for optimal clarity and speed.",
                     reply_markup=MAIN_KEYBOARD
                 )
                 return "OK", 200
@@ -309,9 +335,9 @@ def webhook():
                 send_message(
                     chat_id,
                     "ℹ️ How to use StoryVoice AI:\n\n"
-                    "1. Record a voice note to save your voice profile.\n"
+                    "1. Record a clear 10–15s voice note to save your voice profile.\n"
                     "2. Send any text message to convert to speech.\n"
-                    "3. Send a new voice note whenever you wish to re-clone your voice.",
+                    "3. Stop voice notes immediately after speaking to prevent audio glitches.",
                     reply_markup=MAIN_KEYBOARD
                 )
                 return "OK", 200
@@ -382,4 +408,4 @@ def webhook():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
-        
+    
