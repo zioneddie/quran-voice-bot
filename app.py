@@ -53,8 +53,24 @@ def send_message(chat_id: int, text: str, reply_markup=None):
     requests.post(f"{TELEGRAM_API}/sendMessage", json=payload)
 
 def send_voice(chat_id: int, voice_url: str):
-    # Using sendAudio so Telegram accepts .wav and .mp3 files directly from XTTS-v2
-    requests.post(f"{TELEGRAM_API}/sendAudio", json={"chat_id": chat_id, "audio": voice_url})
+    """Downloads audio from Replicate and uploads raw bytes directly to Telegram."""
+    try:
+        # Download audio from Replicate
+        audio_res = requests.get(voice_url, timeout=20)
+        if audio_res.status_code != 200:
+            send_message(chat_id, f"⚠️ Failed to download audio from Replicate (HTTP {audio_res.status_code}).")
+            return
+
+        # Upload file directly to Telegram
+        files = {"audio": ("narration.wav", audio_res.content, "audio/wav")}
+        res = requests.post(f"{TELEGRAM_API}/sendAudio", data={"chat_id": chat_id}, files=files, timeout=30)
+        
+        res_json = res.json()
+        if not res_json.get("ok"):
+            err_desc = res_json.get("description", "Unknown Telegram delivery error")
+            send_message(chat_id, f"⚠️ Telegram audio delivery failed: {err_desc}")
+    except Exception as e:
+        send_message(chat_id, f"⚠️ Delivery exception: {str(e)}")
 
 def get_telegram_file_url(file_id: str) -> str:
     res = requests.get(f"{TELEGRAM_API}/getFile", params={"file_id": file_id}).json()
@@ -282,4 +298,4 @@ def webhook():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
-            
+        
