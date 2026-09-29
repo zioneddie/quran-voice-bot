@@ -4,6 +4,7 @@ import io
 import wave
 import requests
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from flask import Flask, request
 import replicate
@@ -78,16 +79,14 @@ def sanitize_and_fix_script(text: str) -> str:
         
     return text
 
-def split_text_into_chunks(text: str, max_chars: int = 220) -> list:
+def split_text_into_chunks(text: str, max_chars: int = 400) -> list:
     """
-    Splits long scripts into 150-220 character chunks at natural sentence boundaries.
-    Gives XTTS-v2 optimal breathing cadence and smooth sentence transitions.
+    Splits long scripts into ~400 character chunks at natural sentence boundaries.
     """
     text = text.strip()
     if len(text) <= max_chars:
         return [text]
     
-    # Split text by sentence boundaries (. ! ?)
     sentences = re.split(r'(?<=[.!?])\s+', text)
     chunks = []
     current_chunk = ""
@@ -109,8 +108,7 @@ def split_text_into_chunks(text: str, max_chars: int = 220) -> list:
 
 def combine_wav_audio_list(wav_bytes_list: list) -> bytes:
     """
-    Stitches multiple WAV byte streams into a single continuous WAV audio stream
-    using Python's built-in wave module.
+    Stitches multiple WAV byte streams into a single continuous WAV audio stream.
     """
     valid_bytes = [b for b in wav_bytes_list if b]
     if not valid_bytes:
@@ -120,7 +118,6 @@ def combine_wav_audio_list(wav_bytes_list: list) -> bytes:
 
     output = io.BytesIO()
     try:
-        # Read parameters from first WAV chunk
         with wave.open(io.BytesIO(valid_bytes[0]), 'rb') as first_wav:
             params = first_wav.getparams()
 
@@ -243,12 +240,9 @@ def check_and_increment_quota(user_id: int) -> tuple:
     return False, "Quota Exceeded", 0
 
 # --- Voice Generation ---
-def generate_voice_narration_bytes(text: str, speaker_audio_url: str) -> bytes:
-    clean_text = sanitize_and_fix_script(text)
-    chunks = split_text_into_chunks(clean_text, max_chars=220)
-    
-    wav_bytes_list = []
-    for chunk in chunks:
+def generate_single_chunk(chunk: str, speaker_audio_url: str) -> bytes:
+    """Generates audio for a single chunk from Replicate."""
+    try:
         output = replicate.run(
             "lucataco/xtts-v2:684bc3855b37866c0c65add2ff39c78f3dea3f4ff103a436465326e0f438d55e",
             input={
@@ -261,7 +255,18 @@ def generate_voice_narration_bytes(text: str, speaker_audio_url: str) -> bytes:
         url = str(output[0]) if isinstance(output, list) else str(output)
         res = requests.get(url, timeout=25)
         if res.status_code == 200:
-            wav_bytes_list.append(res.content)
+            return res.content
+    except Exception as e:
+        print(f"Error processing chunk: {e}")
+    return b""
+
+def generate_voice_narration_bytes(text: str, speaker_audio_url: str) -> bytes:
+    clean_text = sanitize_and_fix_script(text)
+    chunks = split_text_into_chunks(clean_text, max_chars=400)
+    
+    # Process all chunks concurrently in parallel threads
+    with ThreadPoolExecutor(max_workers=len(chunks)) as executor:
+        wav_bytes_list = list(executor.map(lambda c: generate_single_chunk(c, speaker_audio_url), chunks))
             
     return combine_wav_audio_list(wav_bytes_list)
 
@@ -473,4 +478,4 @@ def webhook():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
-                    
+    
