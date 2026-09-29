@@ -13,7 +13,6 @@ def get_clean_env(key_name: str) -> str:
     val = os.environ.get(key_name, "")
     if not val:
         return ""
-    # Strip carriage returns, newlines, double quotes, single quotes, and leading/trailing whitespace
     return val.replace("\r", "").replace("\n", "").strip().strip('"\'')
 
 BOT_TOKEN = get_clean_env("BOT_TOKEN")
@@ -54,7 +53,8 @@ def send_message(chat_id: int, text: str, reply_markup=None):
     requests.post(f"{TELEGRAM_API}/sendMessage", json=payload)
 
 def send_voice(chat_id: int, voice_url: str):
-    requests.post(f"{TELEGRAM_API}/sendVoice", json={"chat_id": chat_id, "voice": voice_url})
+    # Using sendAudio so Telegram accepts .wav and .mp3 files directly from XTTS-v2
+    requests.post(f"{TELEGRAM_API}/sendAudio", json={"chat_id": chat_id, "audio": voice_url})
 
 def get_telegram_file_url(file_id: str) -> str:
     res = requests.get(f"{TELEGRAM_API}/getFile", params={"file_id": file_id}).json()
@@ -235,7 +235,7 @@ def webhook():
                             reply_markup=MAIN_KEYBOARD
                         )
                 else:
-                    send_message(chat_id, "⚠️️ Couldn't retrieve voice file from Telegram.", reply_markup=MAIN_KEYBOARD)
+                    send_message(chat_id, "⚠ Couldn't retrieve voice file from Telegram.", reply_markup=MAIN_KEYBOARD)
             return "OK", 200
 
         # --- Process Plain Text Script ---
@@ -261,7 +261,7 @@ def webhook():
             if not allowed:
                 send_message(
                     chat_id,
-                    f"⚠️️ You've reached your daily limit of {DAILY_LIMIT} voiceovers. Please try again tomorrow!",
+                    f"⚠ You've reached your daily limit of {DAILY_LIMIT} voiceovers. Please try again tomorrow!",
                     reply_markup=MAIN_KEYBOARD
                 )
                 return "OK", 200
@@ -282,3 +282,4 @@ def webhook():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
+            
