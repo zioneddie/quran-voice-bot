@@ -2,9 +2,9 @@ import os
 import re
 import io
 import wave
+import time
 import requests
 import threading
-from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from flask import Flask, request
 import replicate
@@ -241,32 +241,50 @@ def check_and_increment_quota(user_id: int) -> tuple:
 
 # --- Voice Generation ---
 def generate_single_chunk(chunk: str, speaker_audio_url: str) -> bytes:
-    """Generates audio for a single chunk from Replicate."""
-    try:
-        output = replicate.run(
-            "lucataco/xtts-v2:684bc3855b37866c0c65add2ff39c78f3dea3f4ff103a436465326e0f438d55e",
-            input={
-                "text": chunk,
-                "speaker": speaker_audio_url,
-                "language": "en",
-                "speed": 1.0
-            }
-        )
-        url = str(output[0]) if isinstance(output, list) else str(output)
-        res = requests.get(url, timeout=25)
-        if res.status_code == 200:
-            return res.content
-    except Exception as e:
-        print(f"Error processing chunk: {e}")
+    """Generates audio for a single chunk with automatic 429 rate limit retries."""
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            output = replicate.run(
+                "lucataco/xtts-v2:684bc3855b37866c0c65add2ff39c78f3dea3f4ff103a436465326e0f438d55e",
+                input={
+                    "text": chunk,
+                    "speaker": speaker_audio_url,
+                    "language": "en",
+                    "speed": 1.0
+                }
+            )
+            url = str(output[0]) if isinstance(output, list) else str(output)
+            res = requests.get(url, timeout=25)
+            if res.status_code == 200:
+                return res.content
+        except Exception as e:
+            err_msg = str(e)
+            if "429" in err_msg or "throttled" in err_msg.lower():
+                print(f"Rate limited on attempt {attempt+1}. Sleeping 4.5s...")
+                time.sleep(4.5)  # Wait for Replicate rate limit reset timer
+                continue
+            print(f"Error processing chunk: {e}")
+            break
     return b""
 
 def generate_voice_narration_bytes(text: str, speaker_audio_url: str) -> bytes:
     clean_text = sanitize_and_fix_script(text)
-    chunks = split_text_into_chunks(clean_text, max_chars=400)
     
-    # Process all chunks concurrently in parallel threads
-    with ThreadPoolExecutor(max_workers=len(chunks)) as executor:
-        wav_bytes_list = list(executor.map(lambda c: generate_single_chunk(c, speaker_audio_url), chunks))
+    # If script fits in single chunk, call once
+    if len(clean_text) <= 400:
+        return generate_single_chunk(clean_text, speaker_audio_url)
+
+    # For long admin scripts, split and process sequentially to respect low-credit rate limits
+    chunks = split_text_into_chunks(clean_text, max_chars=400)
+    wav_bytes_list = []
+    
+    for i, chunk in enumerate(chunks):
+        if i > 0:
+            time.sleep(1.0)  # Gentle 1s delay between sequential calls
+        audio_chunk = generate_single_chunk(chunk, speaker_audio_url)
+        if audio_chunk:
+            wav_bytes_list.append(audio_chunk)
             
     return combine_wav_audio_list(wav_bytes_list)
 
@@ -448,7 +466,7 @@ def webhook():
                 if not user_voice_url:
                     send_message(
                         chat_id,
-                        "Please record and upload a voice note first by tapping '🎙️ Clone My Voice'!",
+                        f"Please record and upload a voice note first by tapping '🎙️ Clone My Voice'!",
                         reply_markup=MAIN_KEYBOARD
                     )
                     return "OK", 200
@@ -478,4 +496,4 @@ def webhook():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
-    
+            
