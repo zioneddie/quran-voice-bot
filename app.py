@@ -1,5 +1,7 @@
 import os
 import re
+import io
+import wave
 import requests
 import threading
 from datetime import datetime
@@ -57,14 +59,14 @@ BUY_KEYBOARD = {
 # --- Text Sanitization & Anti-Hallucination ---
 def sanitize_and_fix_script(text: str) -> str:
     """
-    Cleans script to prevent XTTS-v2 model hallucinations and end-of-sentence gibberish.
-    Forces ending punctuation so the model cleanly triggers its end-of-sequence token.
+    Cleans script to prevent XTTS-v2 model hallucinations.
+    Forces ending punctuation so the model cleanly finishes speech.
     """
     if not text:
         return ""
     text = text.strip()
     
-    # Remove emojis and unsupported special characters that confuse the AI tokenizer
+    # Remove emojis and unsupported special characters
     text = re.sub(r'[^\w\s.,!?\'"-]', '', text)
     
     # Collapse multiple spaces or newlines into a single space
@@ -75,6 +77,66 @@ def sanitize_and_fix_script(text: str) -> str:
         text += '.'
         
     return text
+
+def split_text_into_chunks(text: str, max_chars: int = 220) -> list:
+    """
+    Splits long scripts into 150-220 character chunks at natural sentence boundaries.
+    Gives XTTS-v2 optimal breathing cadence and smooth sentence transitions.
+    """
+    text = text.strip()
+    if len(text) <= max_chars:
+        return [text]
+    
+    # Split text by sentence boundaries (. ! ?)
+    sentences = re.split(r'(?<=[.!?])\s+', text)
+    chunks = []
+    current_chunk = ""
+
+    for sentence in sentences:
+        if not sentence:
+            continue
+        if len(current_chunk) + len(sentence) + 1 <= max_chars:
+            current_chunk += (" " if current_chunk else "") + sentence
+        else:
+            if current_chunk:
+                chunks.append(current_chunk)
+            current_chunk = sentence
+
+    if current_chunk:
+        chunks.append(current_chunk)
+
+    return chunks
+
+def combine_wav_audio_list(wav_bytes_list: list) -> bytes:
+    """
+    Stitches multiple WAV byte streams into a single continuous WAV audio stream
+    using Python's built-in wave module.
+    """
+    valid_bytes = [b for b in wav_bytes_list if b]
+    if not valid_bytes:
+        return b""
+    if len(valid_bytes) == 1:
+        return valid_bytes[0]
+
+    output = io.BytesIO()
+    try:
+        # Read parameters from first WAV chunk
+        with wave.open(io.BytesIO(valid_bytes[0]), 'rb') as first_wav:
+            params = first_wav.getparams()
+
+        with wave.open(output, 'wb') as wav_out:
+            wav_out.setparams(params)
+            for w_bytes in valid_bytes:
+                try:
+                    with wave.open(io.BytesIO(w_bytes), 'rb') as w_in:
+                        wav_out.writeframes(w_in.readframes(w_in.getnframes()))
+                except Exception as chunk_err:
+                    print(f"Error merging WAV chunk: {chunk_err}")
+
+        return output.getvalue()
+    except Exception as e:
+        print(f"WAV stitching error: {e}")
+        return valid_bytes[0]
 
 # --- Telegram Helper Functions ---
 def send_message(chat_id: int, text: str, reply_markup=None):
@@ -96,16 +158,11 @@ def send_invoice(chat_id: int, title: str, description: str, payload_str: str, s
     }
     requests.post(f"{TELEGRAM_API}/sendInvoice", json=invoice_data)
 
-def send_voice(chat_id: int, voice_url: str):
-    """Downloads audio from Replicate and uploads raw bytes directly to Telegram."""
+def send_voice_bytes(chat_id: int, audio_bytes: bytes):
+    """Uploads merged audio bytes directly to Telegram."""
     try:
-        audio_res = requests.get(voice_url, timeout=25)
-        if audio_res.status_code != 200:
-            send_message(chat_id, f"⚠️ Failed to retrieve audio from generator (HTTP {audio_res.status_code}).")
-            return
-
-        files = {"audio": ("narration.wav", audio_res.content, "audio/wav")}
-        res = requests.post(f"{TELEGRAM_API}/sendAudio", data={"chat_id": chat_id}, files=files, timeout=30)
+        files = {"audio": ("narration.wav", audio_bytes, "audio/wav")}
+        res = requests.post(f"{TELEGRAM_API}/sendAudio", data={"chat_id": chat_id}, files=files, timeout=45)
         
         res_json = res.json()
         if not res_json.get("ok"):
@@ -186,27 +243,35 @@ def check_and_increment_quota(user_id: int) -> tuple:
     return False, "Quota Exceeded", 0
 
 # --- Voice Generation ---
-def generate_voice_narration(text: str, speaker_audio_url: str) -> str:
-    # Clean text to stop end-of-sentence gibberish
+def generate_voice_narration_bytes(text: str, speaker_audio_url: str) -> bytes:
     clean_text = sanitize_and_fix_script(text)
+    chunks = split_text_into_chunks(clean_text, max_chars=220)
     
-    output = replicate.run(
-        "lucataco/xtts-v2:684bc3855b37866c0c65add2ff39c78f3dea3f4ff103a436465326e0f438d55e",
-        input={
-            "text": clean_text,
-            "speaker": speaker_audio_url,
-            "language": "en",
-            "speed": 1.0
-        }
-    )
-    if isinstance(output, list):
-        return str(output[0])
-    return str(output)
+    wav_bytes_list = []
+    for chunk in chunks:
+        output = replicate.run(
+            "lucataco/xtts-v2:684bc3855b37866c0c65add2ff39c78f3dea3f4ff103a436465326e0f438d55e",
+            input={
+                "text": chunk,
+                "speaker": speaker_audio_url,
+                "language": "en",
+                "speed": 1.0
+            }
+        )
+        url = str(output[0]) if isinstance(output, list) else str(output)
+        res = requests.get(url, timeout=25)
+        if res.status_code == 200:
+            wav_bytes_list.append(res.content)
+            
+    return combine_wav_audio_list(wav_bytes_list)
 
 def process_narration_task(chat_id: int, text: str, user_voice_url: str):
     try:
-        audio_url = generate_voice_narration(text, user_voice_url)
-        send_voice(chat_id, audio_url)
+        audio_bytes = generate_voice_narration_bytes(text, user_voice_url)
+        if audio_bytes:
+            send_voice_bytes(chat_id, audio_bytes)
+        else:
+            send_message(chat_id, "⚠️ Failed to generate audio stream.", reply_markup=MAIN_KEYBOARD)
     except Exception as e:
         send_message(chat_id, f"⚠️ Error generating audio narration: {str(e)}", reply_markup=MAIN_KEYBOARD)
 
@@ -304,7 +369,7 @@ def webhook():
                     chat_id,
                     "📝 AI Voiceover Tips:\n\n"
                     "• Always end sentences with periods (.) or exclamation marks (!) for clean speech pauses.\n"
-                    "• Use commas for natural pauses.\n"
+                    "• Use commas for short natural breaths.\n"
                     "• Keep paragraphs under 400 characters for optimal clarity and speed.",
                     reply_markup=MAIN_KEYBOARD
                 )
@@ -408,4 +473,4 @@ def webhook():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
-    
+                    
