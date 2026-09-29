@@ -7,23 +7,31 @@ import replicate
 
 app = Flask(__name__)
 
-# --- Environment Variables ---
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "").strip('"\' ')
+# --- Environment Variables with Bulletproof Safeguards ---
+def get_clean_env(key_name: str) -> str:
+    """Retrieves an environment variable and strips hidden spaces, quotes, and newlines."""
+    val = os.environ.get(key_name, "")
+    if not val:
+        return ""
+    # Strip carriage returns, newlines, double quotes, single quotes, and leading/trailing whitespace
+    return val.replace("\r", "").replace("\n", "").strip().strip('"\'')
+
+BOT_TOKEN = get_clean_env("BOT_TOKEN")
 TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
 # Checks all common variable names for Upstash REST URL
 UPSTASH_URL = (
-    os.environ.get("UPSTASH_REDIS_REST_URL") or 
-    os.environ.get("UPSTASH_URL") or 
-    os.environ.get("REDIS_URL") or ""
-).strip('"\' ')
+    get_clean_env("UPSTASH_REDIS_REST_URL") or 
+    get_clean_env("UPSTASH_URL") or 
+    get_clean_env("REDIS_URL")
+)
 
 # Checks all common variable names for Upstash REST Token
 UPSTASH_TOKEN = (
-    os.environ.get("UPSTASH_REDIS_REST_TOKEN") or 
-    os.environ.get("UPSTASH_TOKEN") or 
-    os.environ.get("REDIS_TOKEN") or ""
-).strip('"\' ')
+    get_clean_env("UPSTASH_REDIS_REST_TOKEN") or 
+    get_clean_env("UPSTASH_TOKEN") or 
+    get_clean_env("REDIS_TOKEN")
+)
 
 # --- Limits & Rules ---
 MAX_CHARS = 400       # Maximum text length per request
@@ -55,7 +63,7 @@ def get_telegram_file_url(file_id: str) -> str:
         return f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}"
     return None
 
-# --- Direct Upstash REST Helper with Diagnostics ---
+# --- Direct Upstash REST Helper ---
 def redis_cmd(*args):
     """Executes Redis commands directly over Upstash REST API using requests."""
     if not UPSTASH_URL:
@@ -227,7 +235,7 @@ def webhook():
                             reply_markup=MAIN_KEYBOARD
                         )
                 else:
-                    send_message(chat_id, "⚠️ Couldn't retrieve voice file from Telegram.", reply_markup=MAIN_KEYBOARD)
+                    send_message(chat_id, "⚠️️ Couldn't retrieve voice file from Telegram.", reply_markup=MAIN_KEYBOARD)
             return "OK", 200
 
         # --- Process Plain Text Script ---
@@ -253,7 +261,7 @@ def webhook():
             if not allowed:
                 send_message(
                     chat_id,
-                    f"⚠️ You've reached your daily limit of {DAILY_LIMIT} voiceovers. Please try again tomorrow!",
+                    f"⚠️️ You've reached your daily limit of {DAILY_LIMIT} voiceovers. Please try again tomorrow!",
                     reply_markup=MAIN_KEYBOARD
                 )
                 return "OK", 200
@@ -274,4 +282,3 @@ def webhook():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
-            
