@@ -6,28 +6,22 @@ import telebot
 from telebot import types
 
 # --- ENVIRONMENT VARIABLES & CONFIGURATION ---
-BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
+BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN") or os.environ.get("BOT_TOKEN")
 FISH_AUDIO_API_KEY = os.environ.get("FISH_AUDIO_API_KEY")
-ADMIN_ID = int(os.environ.get("ADMIN_ID", "0"))  # Set your Telegram ID in Render Env Vars
+ADMIN_ID = int(os.environ.get("ADMIN_ID", "0"))
 
-# Limits
 MAX_WORDS = 300
 INITIAL_TRIALS = 3
 DAILY_ALLOWANCE = 2
 
-# Initialize Telebot & Flask
-bot = telebot.TeleBot(BOT_TOKEN, parse_mode="Markdown")
+# Initialize Telebot with HTML parse mode for zero formatting crashes
+bot = telebot.TeleBot(BOT_TOKEN, parse_mode="HTML")
 app = Flask(__name__)
 
-# --- IN-MEMORY DATABASE (Will persist while app runs) ---
-# For permanent storage across restarts, connect Upstash Redis or Supabase later.
 user_db = {}
 
 def get_user_data(chat_id: int) -> dict:
-    """Fetches user account state and handles daily trial resets."""
     today = datetime.date.today().isoformat()
-    
-    # New User Initialization
     if chat_id not in user_db:
         user_db[chat_id] = {
             "voice_id": None,
@@ -38,8 +32,6 @@ def get_user_data(chat_id: int) -> dict:
         return user_db[chat_id]
     
     user = user_db[chat_id]
-    
-    # Daily Reset Logic
     if user["last_active_date"] != today:
         user["daily_trials"] = DAILY_ALLOWANCE
         user["last_active_date"] = today
@@ -48,19 +40,16 @@ def get_user_data(chat_id: int) -> dict:
 
 
 def validate_user_request(chat_id: int, text: str):
-    """Validates word count and remaining user trials."""
     words = text.strip().split()
     word_count = len(words)
     
-    # 1. Word Limit Check
     if word_count > MAX_WORDS:
         return False, None, (
-            f"⚠️ **Script too long!**\n\n"
-            f"Regular users can convert up to **{MAX_WORDS} words** per request.\n"
-            f"Your text contains **{word_count} words**."
+            f"⚠️ <b>Script too long!</b>\n\n"
+            f"Regular users can convert up to <b>{MAX_WORDS} words</b> per request.\n"
+            f"Your text contains <b>{word_count} words</b>."
         )
 
-    # 2. Credits Check
     user = get_user_data(chat_id)
     if user["welcome_trials"] > 0:
         return True, "welcome", None
@@ -68,14 +57,13 @@ def validate_user_request(chat_id: int, text: str):
         return True, "daily", None
     else:
         return False, None, (
-            "⚠️ **Daily limit reached!**\n\n"
+            "⚠️ <b>Daily limit reached!</b>\n\n"
             "You have used all your free generations for today. "
             "Your 2 free daily trials reset tomorrow, or you can top up for unlimited access!"
         )
 
 
 def deduct_user_trial(chat_id: int, trial_type: str):
-    """Deducts a trial only after successful voice generation."""
     user = user_db[chat_id]
     if trial_type == "welcome":
         user["welcome_trials"] -= 1
@@ -86,7 +74,6 @@ def deduct_user_trial(chat_id: int, trial_type: str):
 # --- FISH AUDIO API INTEGRATION ---
 
 def send_admin_alert(message_text: str):
-    """Sends private alert to admin Telegram ID."""
     if ADMIN_ID != 0:
         try:
             bot.send_message(ADMIN_ID, message_text)
@@ -95,7 +82,6 @@ def send_admin_alert(message_text: str):
 
 
 def create_fish_voice_model(audio_bytes: bytes, filename: str = "voice.mp3") -> str:
-    """Uploads user's audio to Fish Audio to generate a custom voice reference_id."""
     url = "https://api.fish.audio/model"
     headers = {"Authorization": f"Bearer {FISH_AUDIO_API_KEY}"}
     data = {
@@ -111,7 +97,7 @@ def create_fish_voice_model(audio_bytes: bytes, filename: str = "voice.mp3") -> 
         if response.status_code in [200, 201]:
             return response.json().get("id")
         elif response.status_code in [401, 402]:
-            send_admin_alert("🚨 **CRITICAL ALERT:** Fish Audio account is OUT OF CREDITS or API Key is invalid!")
+            send_admin_alert("🚨 <b>CRITICAL ALERT:</b> Fish Audio account is OUT OF CREDITS or API Key is invalid!")
             return None
         else:
             print(f"Model creation failed: {response.status_code} - {response.text}")
@@ -122,7 +108,6 @@ def create_fish_voice_model(audio_bytes: bytes, filename: str = "voice.mp3") -> 
 
 
 def generate_speech_fish(text: str, reference_id: str, chat_id: int) -> bytes:
-    """Generates speech via Fish Audio API and handles out-of-credit alerts."""
     url = "https://api.fish.audio/v1/tts"
     headers = {
         "Authorization": f"Bearer {FISH_AUDIO_API_KEY}",
@@ -137,9 +122,8 @@ def generate_speech_fish(text: str, reference_id: str, chat_id: int) -> bytes:
     try:
         response = requests.post(url, json=payload, headers=headers, timeout=60)
 
-        # Catch Out of Credits / Authentication Errors
         if response.status_code in [401, 402]:
-            send_admin_alert("🚨 **CRITICAL ALERT:** Fish Audio balance is empty! Users cannot generate voices.")
+            send_admin_alert("🚨 <b>CRITICAL ALERT:</b> Fish Audio balance is empty! Users cannot generate voices.")
             bot.send_message(
                 chat_id, 
                 "⚠️ Service is temporarily undergoing quick maintenance. Please try again in a few minutes!"
@@ -161,7 +145,6 @@ def generate_speech_fish(text: str, reference_id: str, chat_id: int) -> bytes:
 # --- KEYBOARDS & UI ---
 
 def get_main_keyboard():
-    """Generates Telegram Reply Keyboard."""
     markup = types.ReplyKeyboardMarkup(row_width=2, resize_keyboard=True)
     btn_clone = types.KeyboardButton("🎙️ Clone My Voice")
     btn_buy = types.KeyboardButton("💳 Buy Credits")
@@ -181,22 +164,22 @@ def get_main_keyboard():
 def handle_start(message):
     get_user_data(message.chat.id)
     welcome_text = (
-        "Welcome to StoryVoice AI Studio! 🎙✨\n\n"
+        "Welcome to <b>StoryVoice AI Studio!</b> 🎙✨\n\n"
         "Your ultimate AI Voice Cloning & Storytelling Assistant.\n\n"
-        "⚡ **Quick Start:**\n"
-        "1️⃣ Tap **'🎙️ Clone My Voice'** and send a clear 10–15s voice note.\n"
-        "2️⃣ Send any text script or story (up to **300 words**).\n"
+        "⚡ <b>Quick Start:</b>\n"
+        "1️⃣ Tap <b>'🎙️ Clone My Voice'</b> and send a clear 10–15s voice note.\n"
+        "2️⃣ Send any text script or story (up to <b>300 words</b>).\n"
         "3️⃣ Receive your custom audio narration in seconds!\n\n"
-        "🎁 **Free Tier:** You get **3 Welcome Bonus Credits** + **2 FREE generations** every single day!"
+        "🎁 <b>Free Tier:</b> You get <b>3 Welcome Bonus Credits</b> + <b>2 FREE generations</b> every single day!"
     )
     bot.send_message(message.chat.id, welcome_text, reply_markup=get_main_keyboard())
 
 
-@bot.message_handler(func=lambda msg: msg.text == "🎙️️ Clone My Voice")
+@bot.message_handler(func=lambda msg: msg.text == "🎙️ Clone My Voice")
 def handle_clone_button(message):
     bot.send_message(
         message.chat.id,
-        "🎙️️ **Send me a clear voice note!**\n\n"
+        "🎙 <b>Send me a clear voice note!</b>\n\n"
         "• Duration: 10 to 15 seconds\n"
         "• Environment: Quiet background\n"
         "• Tip: Speak naturally at a steady pace."
@@ -209,12 +192,12 @@ def handle_status_button(message):
     has_voice = "✅ Saved" if user["voice_id"] else "❌ Not Cloned Yet"
     
     status_text = (
-        "📊 **Your Account Status**\n\n"
-        f"🎙️ **Voice Model:** {has_voice}\n"
-        f"🎁 **Welcome Credits:** {user['welcome_trials']} left\n"
-        f"🔄 **Daily Free Credits:** {user['daily_trials']}/2 left\n"
-        f"📝 **Max Script Length:** {MAX_WORDS} words\n\n"
-        "Need more credits or longer scripts? Tap **'💳 Buy Credits'**!"
+        "📊 <b>Your Account Status</b>\n\n"
+        f"🎙️ <b>Voice Model:</b> {has_voice}\n"
+        f"🎁 <b>Welcome Credits:</b> {user['welcome_trials']} left\n"
+        f"🔄 <b>Daily Free Credits:</b> {user['daily_trials']}/2 left\n"
+        f"📝 <b>Max Script Length:</b> {MAX_WORDS} words\n\n"
+        "Need more credits or longer scripts? Tap <b>'💳 Buy Credits'</b>!"
     )
     bot.send_message(message.chat.id, status_text)
 
@@ -223,10 +206,10 @@ def handle_status_button(message):
 def handle_buy_button(message):
     bot.send_message(
         message.chat.id,
-        "💳 **Upgrade Your Tier**\n\n"
+        "💳 <b>Upgrade Your Tier</b>\n\n"
         "Get access to unlimited generations, longer scripts, and priority processing.\n\n"
-        "• **Minimum Tier:** 30 Telegram Stars\n\n"
-        "*(Telegram Stars payment integration active!)*"
+        "• <b>Minimum Tier:</b> 30 Telegram Stars\n\n"
+        "<i>(Telegram Stars payment integration active!)</i>"
     )
 
 
@@ -234,10 +217,10 @@ def handle_buy_button(message):
 def handle_tips_button(message):
     bot.send_message(
         message.chat.id,
-        "💡 **Storytelling & Social Media Tips:**\n\n"
-        "1. **Hooks:** Keep the first 3 seconds exciting!\n"
-        "2. **Punctuation:** Use commas and periods to guide the AI's natural pauses.\n"
-        "3. **Visuals:** Pair your generated audio with book quotes or aesthetic video loops for viral reach!"
+        "💡 <b>Storytelling & Social Media Tips:</b>\n\n"
+        "1. <b>Hooks:</b> Keep the first 3 seconds exciting!\n"
+        "2. <b>Punctuation:</b> Use commas and periods to guide the AI's natural pauses.\n"
+        "3. <b>Visuals:</b> Pair your generated audio with book quotes or aesthetic video loops for viral reach!"
     )
 
 
@@ -245,26 +228,24 @@ def handle_tips_button(message):
 def handle_help_button(message):
     bot.send_message(
         message.chat.id,
-        "ℹ️ **Need Help?**\n\n"
-        "1. Click **'🎙️ Clone My Voice'** and record your voice.\n"
+        "ℹ️ <b>Need Help?</b>\n\n"
+        "1. Click <b>'🎙️ Clone My Voice'</b> and record your voice.\n"
         "2. Type or paste your story text (up to 300 words).\n"
         "3. The bot will automatically generate audio in your cloned voice!"
     )
 
 
-# --- VOICE NOTE HANDLER (Voice Cloning) ---
+# --- VOICE NOTE HANDLER ---
 
 @bot.message_handler(content_types=['voice', 'audio'])
 def handle_voice_input(message):
     chat_id = message.chat.id
-    bot.send_message(chat_id, "⏳ **Processing your voice sample...** Please wait a moment.")
+    bot.send_message(chat_id, "⏳ <b>Processing your voice sample...</b> Please wait a moment.")
     
     try:
-        # Download audio from Telegram
         file_info = bot.get_file(message.voice.file_id if message.voice else message.audio.file_id)
         downloaded_file = bot.download_file(file_info.file_path)
 
-        # Send to Fish Audio
         reference_id = create_fish_voice_model(downloaded_file)
 
         if reference_id:
@@ -272,7 +253,7 @@ def handle_voice_input(message):
             user["voice_id"] = reference_id
             bot.send_message(
                 chat_id,
-                "🎉 **Voice cloned successfully!**\n\n"
+                "🎉 <b>Voice cloned successfully!</b>\n\n"
                 "Now, send me any text script (up to 300 words) and I will read it in your voice!"
             )
         else:
@@ -283,7 +264,7 @@ def handle_voice_input(message):
         bot.send_message(chat_id, "❌ Error receiving audio. Please try sending it again.")
 
 
-# --- TEXT SCRIPT HANDLER (Voice Generation) ---
+# --- TEXT SCRIPT HANDLER ---
 
 @bot.message_handler(func=lambda msg: True, content_types=['text'])
 def handle_text_generation(message):
@@ -291,24 +272,21 @@ def handle_text_generation(message):
     text = message.text.strip()
     user = get_user_data(chat_id)
 
-    # Check if voice is cloned first
     if not user["voice_id"]:
         bot.send_message(
             chat_id,
-            "⚠️ **No Voice Model Found!**\n\n"
-            "Please tap **'🎙️ Clone My Voice'** and send a 10–15s voice note first!"
+            "⚠️ <b>No Voice Model Found!</b>\n\n"
+            "Please tap <b>'🎙️ Clone My Voice'</b> and send a 10–15s voice note first!"
         )
         return
 
-    # Validate length and credits
     allowed, trial_type, error_msg = validate_user_request(chat_id, text)
     if not allowed:
         bot.send_message(chat_id, error_msg)
         return
 
-    bot.send_message(chat_id, "🗣️ **Generating your audio narration...**")
+    bot.send_message(chat_id, "🗣️ <b>Generating your audio narration...</b>")
 
-    # Generate Speech
     audio_bytes = generate_speech_fish(text, user["voice_id"], chat_id)
 
     if audio_bytes:
@@ -316,7 +294,7 @@ def handle_text_generation(message):
         bot.send_audio(chat_id, audio_bytes, caption="✨ Here is your generated voiceover!")
 
 
-# --- FLASK WEBHOOK ROUTES FOR RENDER ---
+# --- FLASK WEBHOOK ROUTES ---
 
 @app.route('/', methods=['GET'])
 def index():
@@ -325,15 +303,14 @@ def index():
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
-    if request.headers.get('content-type') == 'application/json':
+    if request.is_json:
         json_string = request.get_data().decode('utf-8')
         update = telebot.types.Update.de_json(json_string)
         bot.process_new_updates([update])
-        return '', 200
+        return 'OK', 200
     return 'Invalid', 400
 
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port)
-    
