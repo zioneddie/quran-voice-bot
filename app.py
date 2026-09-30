@@ -12,7 +12,7 @@ ADMIN_ID = os.getenv("ADMIN_ID", "")
 FISH_AUDIO_API_KEY = (os.getenv("FISH_AUDIO_API_KEY") or "").strip()
 TELEGRAM_BOT_TOKEN = (os.getenv("TELEGRAM_BOT_TOKEN") or "").strip()
 
-# Sanitize Upstash Redis environment variables to eliminate whitespace and '\n'
+# Sanitize Upstash Redis environment variables
 UPSTASH_REDIS_REST_URL = (os.getenv("UPSTASH_REDIS_REST_URL") or "").strip()
 UPSTASH_REDIS_REST_TOKEN = (os.getenv("UPSTASH_REDIS_REST_TOKEN") or "").strip()
 
@@ -40,6 +40,7 @@ def get_user_model(user_id: int) -> str:
     return str(res) if res else None
 
 def set_user_model(user_id: int, model_id: str):
+    """Saves user voice model ID permanently until manually re-cloned."""
     redis_command(["SET", f"user:{user_id}:model_id", str(model_id)])
 
 def get_user_state(user_id: int) -> str:
@@ -105,7 +106,6 @@ def clone_voice_fish_audio(file_bytes: bytes, title: str, mime_type: str = "audi
     filename = "voice.ogg" if "ogg" in mime_type or "opus" in mime_type else "voice.mp3"
     files = {'voices': (filename, file_bytes, mime_type)}
     
-    # FIXED: Included mandatory 'train_mode' parameter required by Fish Audio API
     data = {
         'type': 'tts',
         'title': title,
@@ -142,12 +142,18 @@ def send_message(chat_id: int, text: str, reply_markup: dict = None):
     payload = {"chat_id": chat_id, "text": text, "parse_mode": "Markdown"}
     if reply_markup:
         payload["reply_markup"] = reply_markup
-    requests.post(url, json=payload, timeout=10)
+    res = requests.post(url, json=payload, timeout=10)
+    return res.json()
 
-def send_audio_bytes(chat_id: int, audio_bytes: bytes, filename: str = "voice.mp3"):
+def send_audio_bytes(chat_id: int, audio_bytes: bytes, filename: str = "StoryVoice_AI_Audio.mp3", title: str = "StoryVoice Audio"):
     url = f"{TELEGRAM_API_URL}/sendAudio"
     files = {'audio': (filename, io.BytesIO(audio_bytes), 'audio/mpeg')}
-    requests.post(url, data={'chat_id': chat_id}, files=files, timeout=30)
+    data = {
+        'chat_id': chat_id,
+        'title': title,
+        'performer': 'StoryVoice AI'
+    }
+    requests.post(url, data=data, files=files, timeout=30)
 
 def download_telegram_file(file_id: str):
     res = requests.get(f"{TELEGRAM_API_URL}/getFile?file_id={file_id}", timeout=10).json()
@@ -164,7 +170,6 @@ def answer_callback_query(callback_query_id: str):
 # --- TELEGRAM STARS INVOICE & CUSTOM PAYMENT SYSTEM ---
 def send_stars_invoice(chat_id: int, star_amount: int):
     """Generates a dynamic Telegram Stars invoice based on any star count (Min: 40 Stars)."""
-    # 40 Stars = ~19 credits (approx 0.475 credits per star)
     credits_amount = int(star_amount * 0.475)
     if credits_amount < 1:
         credits_amount = 1
@@ -175,7 +180,7 @@ def send_stars_invoice(chat_id: int, star_amount: int):
         "title": f"StoryVoice: {credits_amount} Credits",
         "description": f"Generates ~{credits_amount * 300:,} words in your cloned voice.",
         "payload": f"custom_credits_{credits_amount}",
-        "currency": "XTR",  # Telegram Stars Currency
+        "currency": "XTR",
         "prices": [{"label": f"{credits_amount} Premium Credits", "amount": star_amount}]
     }
     requests.post(url, json=payload, timeout=10)
@@ -253,7 +258,6 @@ def webhook():
         if "successful_payment" in message:
             payload = message["successful_payment"]["invoice_payload"]
             
-            # Parse credit amount from dynamic payload
             if payload.startswith("custom_credits_"):
                 added = int(payload.replace("custom_credits_", ""))
             else:
@@ -267,18 +271,18 @@ def webhook():
         # Voice/Audio Note Processing for Voice Cloning
         if "voice" in message or "audio" in message:
             file_obj = message.get("voice") or message.get("audio")
-            send_message(chat_id, "⏳ *Processing your voice sample...*\nPlease wait a moment.")
+            send_message(chat_id, "⏳ *Processing your voice sample...*\nPlease wait a moment while we clone your voice.")
             try:
                 audio_bytes, mime_type = download_telegram_file(file_obj["file_id"])
                 model_id = clone_voice_fish_audio(audio_bytes, title=f"user_{user_id}_voice", mime_type=mime_type)
                 
-                # Save persistent model ID to Upstash Redis
+                # Save persistent model ID to Upstash Redis (Saved forever until user re-clones)
                 set_user_model(user_id, model_id)
                 set_user_state(user_id, "IDLE")
                 
                 success_msg = (
-                    "🎉 *Voice cloned successfully!*\n\n"
-                    "Your voice profile is saved to your account. Send any text script (up to 300 words) and I will read it in your exact voice!"
+                    "🎉 *Your voice profile is active & saved permanently!*\n\n"
+                    "Send any text script (up to 300 words) and I will bring it to life in your exact voice!"
                 )
                 send_message(chat_id, success_msg, reply_markup=get_main_keyboard())
             except Exception as e:
@@ -316,11 +320,13 @@ def webhook():
     if raw_text in ["/start", "i Help", "Help"] or clean_btn_text in ["start", "help"]:
         get_user_credits(user_id)
         welcome_text = (
-            "Welcome to *StoryVoice AI*! 🎙️\n\n"
-            "🎁 *Welcome Bonus:* You have 3 Free Credits!\n"
-            "• Daily Refill: 2 Free credits refreshed every 24 hours.\n"
-            "• Script Limit: Up to 300 words per generation.\n\n"
-            "Tap *'🎙 Clone My Voice'* below to record your voice!"
+            "✨ *Welcome to StoryVoice AI!* 🎙️\n\n"
+            "Ever wondered what your stories or posts sound like spoken in your *own* cloned voice? Now you can hear it instantly!\n\n"
+            "🎁 *Welcome Gift:* You have **3 Free Credits** ready to use!\n"
+            "• **Daily Refill:** 2 Free credits refreshed every 24 hours.\n"
+            "• **Script Limit:** Up to 300 words per voice clip.\n"
+            "• **Permanent Storage:** Your voice stays saved permanently until you re-clone it.\n\n"
+            "👇 Tap *'🎙 Clone My Voice'* below to get started!"
         )
         send_message(chat_id, welcome_text, reply_markup=get_main_keyboard())
         return jsonify({"status": "ok"}), 200
@@ -329,7 +335,7 @@ def webhook():
         set_user_state(user_id, "AWAITING_VOICE")
         instructions = (
             "🎙 *Voice Cloning Instructions:*\n\n"
-            "• *Environment:* Quiet background with zero noise or music.\n"
+            "• *Environment:* Quiet room with zero noise or music.\n"
             "• *Duration:* Record a clear **15 to 30 second** voice note.\n"
             "• *Tip:* Speak naturally at a steady, clear pace.\n\n"
             "👇 *Press the microphone button below to send your voice note now:*"
@@ -347,7 +353,7 @@ def webhook():
         user_model = get_user_model(user_id)
         status_text = (
             f"👑 *{'Admin Account Status' if is_admin else 'User Status'}*\n\n"
-            f"🎙 Voice Model: {'✅ Saved & Active' if user_model else '❌ Not Cloned Yet'}\n"
+            f"🎙 Voice Model: {'✅ Saved & Active Permanently' if user_model else '❌ Not Cloned Yet'}\n"
             f"🪙 Credits Balance: {'Unlimited' if is_admin else f'{user_credits} Credits Remaining'}\n"
             f"⚡ Access Tier: {'System Administrator' if is_admin else 'Standard Tier'}"
         )
@@ -381,6 +387,9 @@ def webhook():
             )
             return jsonify({"status": "ok"}), 200
 
+    # Instant status update to inform user generation is in progress
+    send_message(chat_id, "⏳ *Generating your audio clip...* Please give me a few seconds.")
+
     try:
         user_voice_id = get_user_model(user_id)
         enhanced_text = prepare_text_for_tts(raw_text)
@@ -393,7 +402,7 @@ def webhook():
 
     except Exception as e:
         print(f"TTS error: {e}")
-        send_message(chat_id, "Sorry, something went wrong while generating the voice.")
+        send_message(chat_id, "Sorry, something went wrong while generating your voice audio.")
 
     return jsonify({"status": "ok"}), 200
 
@@ -406,4 +415,3 @@ def home():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
-    
