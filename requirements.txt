@@ -1,5 +1,4 @@
-flask
-gunicorn
+pyTelegramBotAPI
+Flask
 requests
-replicate
-upstash-redis
+gunicorn
