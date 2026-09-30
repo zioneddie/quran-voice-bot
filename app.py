@@ -15,7 +15,7 @@ INITIAL_TRIALS = 3
 DAILY_ALLOWANCE = 2
 
 # Initialize Telebot with HTML parse mode
-bot = telebot.TeleBot(BOT_TOKEN, parse_mode="HTML")
+bot = telebot.TeleBot(BOT_TOKEN, parse_mode="HTML", threaded=False)
 app = Flask(__name__)
 
 # Simple in-memory state storage
