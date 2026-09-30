@@ -12,7 +12,6 @@ ADMIN_ID = os.getenv("ADMIN_ID", "")
 FISH_AUDIO_API_KEY = (os.getenv("FISH_AUDIO_API_KEY") or "").strip()
 TELEGRAM_BOT_TOKEN = (os.getenv("TELEGRAM_BOT_TOKEN") or "").strip()
 
-# Sanitize Upstash Redis environment variables
 UPSTASH_REDIS_REST_URL = (os.getenv("UPSTASH_REDIS_REST_URL") or "").strip()
 UPSTASH_REDIS_REST_TOKEN = (os.getenv("UPSTASH_REDIS_REST_TOKEN") or "").strip()
 
@@ -29,8 +28,6 @@ def redis_command(command: list):
         res = requests.post(UPSTASH_REDIS_REST_URL, json=command, headers=headers, timeout=5)
         if res.status_code == 200:
             return res.json().get("result")
-        else:
-            print(f"Upstash Redis REST Non-200 Response ({res.status_code}): {res.text}")
     except Exception as e:
         print(f"Upstash Redis REST Error: {e}")
     return None
@@ -40,7 +37,6 @@ def get_user_model(user_id: int) -> str:
     return str(res) if res else None
 
 def set_user_model(user_id: int, model_id: str):
-    """Saves user voice model ID permanently until manually re-cloned."""
     redis_command(["SET", f"user:{user_id}:model_id", str(model_id)])
 
 def get_user_state(user_id: int) -> str:
@@ -51,17 +47,14 @@ def set_user_state(user_id: int, state: str):
     redis_command(["SET", f"user:{user_id}:state", str(state)])
 
 
-# --- CREDIT & DAILY BALANCE LOGIC ---
+# --- CREDIT & BALANCE MANAGEMENT ---
 def get_user_credits(user_id: int) -> int:
     val = redis_command(["GET", f"user:{user_id}:credits"])
-    
-    # Initialize new user profile (3 Free Welcome Credits)
     if val is None:
         redis_command(["SET", f"user:{user_id}:credits", 3])
         redis_command(["SET", f"user:{user_id}:last_reset", int(time.time())])
         return 3
     
-    # 24-Hour Daily Refill Check
     last_reset = redis_command(["GET", f"user:{user_id}:last_reset"]) or 0
     if time.time() - int(last_reset) > 86400:
         current_credits = int(val)
@@ -83,23 +76,48 @@ def add_credits(user_id: int, amount: int):
     redis_command(["SET", f"user:{user_id}:credits", credits + amount])
 
 
-# --- TEXT PREPROCESSING FOR NATURAL SYNTHESIS ---
+# --- CLEAN PREPROCESSING (FIXES AI HALLUCINATIONS & ACCENT GLITCHES) ---
 def prepare_text_for_tts(text: str) -> str:
     if not text:
         return ""
-    text = re.sub(r'\s+', ' ', text.strip())
-    text = re.sub(r'^(hello|hi|hey|welcome|listen|look|so|well)([\s!,.?])', r'\1... ', text, flags=re.IGNORECASE)
-    text = re.sub(r'[,;]?\s+(but|however|so|because|although|and|then|instead|meanwhile)\b', r', ... \1', text, flags=re.IGNORECASE)
-    text = re.sub(r'\s*--\s*|\s*—\s*|\s*-\s*', ' ... ', text)
-    text = re.sub(r'([.!?])\s*', r'\1 ... ', text)
-    if text and text[-1] not in '.!?':
-        text += '.'
-    return re.sub(r'\.{4,}', '...', text)
+    
+    # 1. Replace dashes and hyphens with clean commas for smooth natural pauses
+    text = re.sub(r'—|-|--', ', ', text)
+    
+    # 2. Collapse double dots/ellipses into single full stops
+    text = re.sub(r'\.{2,}', '.', text)
+    
+    # 3. Clean up excess whitespace
+    text = re.sub(r'\s+', ' ', text).strip()
+    
+    # 4. Remove unsupported weird symbols that break TTS models
+    text = re.sub(r'[^\w\s.,!?\'"]', '', text)
+    
+    return text
 
 
-# --- FISH AUDIO API INTEGRATION ---
+def split_text_into_chunks(text: str, max_chars: int = 250) -> list:
+    """Splits long paragraphs into clean sentence chunks so long voice scripts don't glitch."""
+    sentences = re.split(r'(?<=[.!?])\s+', text)
+    chunks = []
+    current_chunk = ""
+
+    for sentence in sentences:
+        if len(current_chunk) + len(sentence) <= max_chars:
+            current_chunk += (" " if current_chunk else "") + sentence
+        else:
+            if current_chunk:
+                chunks.append(current_chunk)
+            current_chunk = sentence
+
+    if current_chunk:
+        chunks.append(current_chunk)
+        
+    return chunks if chunks else [text]
+
+
+# --- FISH AUDIO API ---
 def clone_voice_fish_audio(file_bytes: bytes, title: str, mime_type: str = "audio/ogg") -> str:
-    """Sends recorded user voice note to Fish Audio for instant voice cloning with required API fields."""
     url = "https://api.fish.audio/model"
     headers = {"Authorization": f"Bearer {FISH_AUDIO_API_KEY}"}
     
@@ -114,13 +132,13 @@ def clone_voice_fish_audio(file_bytes: bytes, title: str, mime_type: str = "audi
     
     res = requests.post(url, headers=headers, data=data, files=files, timeout=45)
     if res.status_code not in [200, 201]:
-        print(f"Fish Audio Error Response: {res.text}")
         raise Exception(f"Fish Audio Error ({res.status_code}): {res.text}")
         
     res_data = res.json()
     return res_data.get("_id") or res_data.get("id")
 
-def generate_voice_fish_audio(text: str, reference_id: str = None) -> bytes:
+
+def generate_single_tts_chunk(text: str, reference_id: str = None) -> bytes:
     url = "https://api.fish.audio/v1/tts"
     headers = {
         "Authorization": f"Bearer {FISH_AUDIO_API_KEY}",
@@ -136,7 +154,19 @@ def generate_voice_fish_audio(text: str, reference_id: str = None) -> bytes:
     return res.content
 
 
-# --- TELEGRAM API HELPERS ---
+def generate_voice_fish_audio(text: str, reference_id: str = None) -> bytes:
+    """Handles long texts by generating clean chunked audio and joining the byte outputs."""
+    chunks = split_text_into_chunks(text)
+    combined_audio = io.BytesIO()
+
+    for chunk in chunks:
+        audio_bytes = generate_single_tts_chunk(chunk, reference_id=reference_id)
+        combined_audio.write(audio_bytes)
+
+    return combined_audio.getvalue()
+
+
+# --- TELEGRAM HELPERS ---
 def send_message(chat_id: int, text: str, reply_markup: dict = None):
     url = f"{TELEGRAM_API_URL}/sendMessage"
     payload = {"chat_id": chat_id, "text": text, "parse_mode": "Markdown"}
@@ -153,7 +183,7 @@ def send_audio_bytes(chat_id: int, audio_bytes: bytes, filename: str = "StoryVoi
         'title': title,
         'performer': 'StoryVoice AI'
     }
-    requests.post(url, data=data, files=files, timeout=30)
+    requests.post(url, data=data, files=files, timeout=40)
 
 def download_telegram_file(file_id: str):
     res = requests.get(f"{TELEGRAM_API_URL}/getFile?file_id={file_id}", timeout=10).json()
@@ -166,10 +196,7 @@ def answer_callback_query(callback_query_id: str):
     url = f"{TELEGRAM_API_URL}/answerCallbackQuery"
     requests.post(url, json={"callback_query_id": callback_query_id}, timeout=5)
 
-
-# --- TELEGRAM STARS INVOICE & CUSTOM PAYMENT SYSTEM ---
 def send_stars_invoice(chat_id: int, star_amount: int):
-    """Generates a dynamic Telegram Stars invoice based on any star count (Min: 40 Stars)."""
     credits_amount = int(star_amount * 0.475)
     if credits_amount < 1:
         credits_amount = 1
@@ -190,7 +217,7 @@ def answer_pre_checkout_query(pre_checkout_query_id: str, ok: bool = True):
     requests.post(url, json={"pre_checkout_query_id": pre_checkout_query_id, "ok": ok}, timeout=5)
 
 
-# --- MAIN KEYBOARD & INLINE UI ---
+# --- KEYBOARDS ---
 def get_main_keyboard():
     return {
         "keyboard": [
@@ -211,14 +238,13 @@ def get_buy_inline_keyboard():
     }
 
 
-# --- MAIN WEBHOOK ROUTER ---
+# --- WEBHOOK ROUTE ---
 @app.route('/webhook', methods=['POST'])
 def webhook():
     data = request.get_json(force=True, silent=True)
     if not data:
         return jsonify({"status": "ignored"}), 200
 
-    # 1. Handle Telegram Stars Pre-Checkout Verification
     if "pre_checkout_query" in data:
         answer_pre_checkout_query(data["pre_checkout_query"]["id"], ok=True)
         return jsonify({"status": "ok"}), 200
@@ -226,7 +252,6 @@ def webhook():
     raw_text = ""
     message = None
     
-    # 2. Extract Callback Query (Inline Keyboard Buttons)
     if "callback_query" in data:
         cb = data["callback_query"]
         answer_callback_query(cb["id"])
@@ -248,13 +273,11 @@ def webhook():
 
         raw_text = cb_data
 
-    # 3. Extract Direct Messages
     elif "message" in data:
         message = data["message"]
         chat_id = message["chat"]["id"]
         user_id = message["from"]["id"]
 
-        # Successful Telegram Stars Payment
         if "successful_payment" in message:
             payload = message["successful_payment"]["invoice_payload"]
             
@@ -268,7 +291,6 @@ def webhook():
             send_message(chat_id, f"🎉 Payment Received! *{added} Premium Credits* added to your balance.", reply_markup=get_main_keyboard())
             return jsonify({"status": "ok"}), 200
 
-        # Voice/Audio Note Processing for Voice Cloning
         if "voice" in message or "audio" in message:
             file_obj = message.get("voice") or message.get("audio")
             send_message(chat_id, "⏳ *Processing your voice sample...*\nPlease wait a moment while we clone your voice.")
@@ -276,7 +298,6 @@ def webhook():
                 audio_bytes, mime_type = download_telegram_file(file_obj["file_id"])
                 model_id = clone_voice_fish_audio(audio_bytes, title=f"user_{user_id}_voice", mime_type=mime_type)
                 
-                # Save persistent model ID to Upstash Redis (Saved forever until user re-clones)
                 set_user_model(user_id, model_id)
                 set_user_state(user_id, "IDLE")
                 
@@ -301,7 +322,6 @@ def webhook():
 
     clean_btn_text = re.sub(r'[^\w\s]', '', raw_text).strip().lower()
 
-    # Handle Custom Stars Input State
     if get_user_state(user_id) == "AWAITING_CUSTOM_STARS":
         if raw_text.isdigit():
             star_val = int(raw_text)
@@ -316,7 +336,6 @@ def webhook():
             send_message(chat_id, "⚠️ Invalid input. Please enter a valid number (e.g. 150):")
             return jsonify({"status": "ok"}), 200
 
-    # 4. Standard Navigation Router
     if raw_text in ["/start", "i Help", "Help"] or clean_btn_text in ["start", "help"]:
         get_user_credits(user_id)
         welcome_text = (
@@ -370,7 +389,7 @@ def webhook():
         send_message(chat_id, tips_text, reply_markup=get_main_keyboard())
         return jsonify({"status": "ok"}), 200
 
-    # 5. TTS Voice Audio Generation
+    # TTS Generation
     words = raw_text.split()
     if len(words) > 300:
         send_message(chat_id, f"⚠️ *Script too long!* Your text contains {len(words)} words. The maximum limit is 300 words per generation.")
@@ -387,7 +406,6 @@ def webhook():
             )
             return jsonify({"status": "ok"}), 200
 
-    # Instant status update to inform user generation is in progress
     send_message(chat_id, "⏳ *Generating your audio clip...* Please give me a few seconds.")
 
     try:
@@ -415,3 +433,4 @@ def home():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
+                 
