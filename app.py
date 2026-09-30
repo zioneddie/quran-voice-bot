@@ -1,4 +1,5 @@
 import os
+import json
 import datetime
 import requests
 from flask import Flask, request
@@ -8,6 +9,10 @@ from telebot import types
 # --- ENVIRONMENT VARIABLES & CONFIGURATION ---
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN") or os.environ.get("BOT_TOKEN")
 FISH_AUDIO_API_KEY = os.environ.get("FISH_AUDIO_API_KEY")
+
+# Upstash Redis REST Credentials
+UPSTASH_REDIS_REST_URL = os.environ.get("UPSTASH_REDIS_REST_URL")
+UPSTASH_REDIS_REST_TOKEN = os.environ.get("UPSTASH_REDIS_REST_TOKEN")
 
 # Defaulting ADMIN_ID to your exact Telegram Chat ID
 ADMIN_ID = int(os.environ.get("ADMIN_ID", "5982017489"))
@@ -20,27 +25,67 @@ DAILY_ALLOWANCE = 2
 bot = telebot.TeleBot(BOT_TOKEN, parse_mode="HTML", threaded=False)
 app = Flask(__name__)
 
-# In-memory user state database
+# Fallback in-memory database
 user_db = {}
+
+
+# --- UPSTASH REDIS HELPERS ---
+
+def redis_cmd(*args):
+    """Executes Redis commands via Upstash REST API without needing extra python packages."""
+    if not UPSTASH_REDIS_REST_URL or not UPSTASH_REDIS_REST_TOKEN:
+        return None
+    try:
+        headers = {"Authorization": f"Bearer {UPSTASH_REDIS_REST_TOKEN}"}
+        url = UPSTASH_REDIS_REST_URL.rstrip('/')
+        response = requests.post(url, json=list(args), headers=headers, timeout=5)
+        if response.status_code == 200:
+            return response.json().get("result")
+    except Exception as e:
+        print(f"--> Upstash Redis Error: {e}", flush=True)
+    return None
 
 
 def get_user_data(chat_id: int) -> dict:
     today = datetime.date.today().isoformat()
-    if chat_id not in user_db:
-        user_db[chat_id] = {
+    key = f"user:{chat_id}"
+    
+    # 1. Try to fetch from Upstash Redis
+    raw_data = redis_cmd("GET", key)
+    user = None
+    if raw_data:
+        try:
+            user = json.loads(raw_data)
+        except Exception:
+            user = None
+
+    # 2. Fall back to local RAM if Redis missed or unavailable
+    if not user:
+        user = user_db.get(chat_id)
+
+    # 3. Create default user record if new
+    if not user:
+        user = {
             "voice_id": None,
             "welcome_trials": INITIAL_TRIALS,
             "daily_trials": DAILY_ALLOWANCE,
             "last_active_date": today
         }
-        return user_db[chat_id]
     
-    user = user_db[chat_id]
-    if user["last_active_date"] != today:
+    # 4. Check for daily credit reset
+    if user.get("last_active_date") != today:
         user["daily_trials"] = DAILY_ALLOWANCE
         user["last_active_date"] = today
-        
+        save_user_data(chat_id, user)
+
+    user_db[chat_id] = user
     return user
+
+
+def save_user_data(chat_id: int, user_data: dict):
+    user_db[chat_id] = user_data
+    key = f"user:{chat_id}"
+    redis_cmd("SET", key, json.dumps(user_data))
 
 
 def validate_user_request(chat_id: int, text: str):
@@ -72,12 +117,12 @@ def validate_user_request(chat_id: int, text: str):
 
 
 def deduct_user_trial(chat_id: int, trial_type: str):
-    user = user_db[chat_id]
+    user = get_user_data(chat_id)
     if trial_type == "welcome":
         user["welcome_trials"] -= 1
     elif trial_type == "daily":
         user["daily_trials"] -= 1
-    # 'admin' type bypasses deduction completely
+    save_user_data(chat_id, user)
 
 
 # --- FISH AUDIO API INTEGRATION ---
@@ -212,7 +257,7 @@ def handle_status_button(message):
     print(f"--> Received 'My Status' from chat_id: {message.chat.id}", flush=True)
     try:
         user = get_user_data(message.chat.id)
-        has_voice = "✅ Saved" if user["voice_id"] else "❌ Not Cloned Yet"
+        has_voice = "✅ Saved" if user.get("voice_id") else "❌ Not Cloned Yet"
         
         if ADMIN_ID != 0 and message.chat.id == ADMIN_ID:
             status_text = (
@@ -225,8 +270,8 @@ def handle_status_button(message):
             status_text = (
                 "📊 <b>Your Account Status</b>\n\n"
                 f"🎙️ <b>Voice Model:</b> {has_voice}\n"
-                f"🎁 <b>Welcome Credits:</b> {user['welcome_trials']} left\n"
-                f"🔄 <b>Daily Free Credits:</b> {user['daily_trials']}/2 left\n"
+                f"🎁 <b>Welcome Credits:</b> {user.get('welcome_trials', 0)} left\n"
+                f"🔄 <b>Daily Free Credits:</b> {user.get('daily_trials', 0)}/2 left\n"
                 f"📝 <b>Max Script Length:</b> {MAX_WORDS} words\n\n"
                 "Need more credits or longer scripts? Tap <b>'💳 Buy Credits'</b>!"
             )
@@ -297,6 +342,8 @@ def handle_voice_input(message):
         if reference_id:
             user = get_user_data(chat_id)
             user["voice_id"] = reference_id
+            save_user_data(chat_id, user)
+            
             bot.send_message(
                 chat_id,
                 "🎉 <b>Voice cloned successfully!</b>\n\n"
@@ -320,10 +367,10 @@ def handle_text_generation(message):
     
     user = get_user_data(chat_id)
 
-    if not user["voice_id"]:
+    if not user.get("voice_id"):
         bot.send_message(
             chat_id,
-            "⚠️ <b>No Voice Model Found!</b>\n\n"
+            "⚠️️ <b>No Voice Model Found!</b>\n\n"
             "Please tap <b>'🎙️ Clone My Voice'</b> and send a 10–15s voice note first!"
         )
         return
@@ -367,4 +414,4 @@ def webhook():
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port)
-    
+        
