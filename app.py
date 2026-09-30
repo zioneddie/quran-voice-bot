@@ -9,10 +9,12 @@ app = Flask(__name__)
 
 # --- ENVIRONMENT CONFIGURATION ---
 ADMIN_ID = os.getenv("ADMIN_ID", "")
-FISH_AUDIO_API_KEY = os.getenv("FISH_AUDIO_API_KEY")
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-UPSTASH_REDIS_REST_URL = os.getenv("UPSTASH_REDIS_REST_URL")
-UPSTASH_REDIS_REST_TOKEN = os.getenv("UPSTASH_REDIS_REST_TOKEN")
+FISH_AUDIO_API_KEY = (os.getenv("FISH_AUDIO_API_KEY") or "").strip()
+TELEGRAM_BOT_TOKEN = (os.getenv("TELEGRAM_BOT_TOKEN") or "").strip()
+
+# Sanitize Upstash Redis environment variables to eliminate whitespace and '\n'
+UPSTASH_REDIS_REST_URL = (os.getenv("UPSTASH_REDIS_REST_URL") or "").strip()
+UPSTASH_REDIS_REST_TOKEN = (os.getenv("UPSTASH_REDIS_REST_TOKEN") or "").strip()
 
 TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
 
@@ -27,6 +29,8 @@ def redis_command(command: list):
         res = requests.post(UPSTASH_REDIS_REST_URL, json=command, headers=headers, timeout=5)
         if res.status_code == 200:
             return res.json().get("result")
+        else:
+            print(f"Upstash Redis REST Non-200 Response ({res.status_code}): {res.text}")
     except Exception as e:
         print(f"Upstash Redis REST Error: {e}")
     return None
@@ -94,14 +98,19 @@ def prepare_text_for_tts(text: str) -> str:
 
 # --- FISH AUDIO API INTEGRATION ---
 def clone_voice_fish_audio(file_bytes: bytes, title: str, mime_type: str = "audio/ogg") -> str:
-    """Sends recorded user voice note to Fish Audio for instant voice cloning."""
+    """Sends recorded user voice note to Fish Audio for instant voice cloning with required API fields."""
     url = "https://api.fish.audio/model"
     headers = {"Authorization": f"Bearer {FISH_AUDIO_API_KEY}"}
     
-    # Correct filename extension based on actual Telegram format (ogg or mp3)
     filename = "voice.ogg" if "ogg" in mime_type or "opus" in mime_type else "voice.mp3"
     files = {'voices': (filename, file_bytes, mime_type)}
-    data = {'type': 'tts', 'title': title}
+    
+    # FIXED: Included mandatory 'train_mode' parameter required by Fish Audio API
+    data = {
+        'type': 'tts',
+        'title': title,
+        'train_mode': 'fast'
+    }
     
     res = requests.post(url, headers=headers, data=data, files=files, timeout=45)
     if res.status_code not in [200, 201]:
@@ -152,23 +161,22 @@ def answer_callback_query(callback_query_id: str):
     requests.post(url, json={"callback_query_id": callback_query_id}, timeout=5)
 
 
-# --- TELEGRAM STARS INVOICE ---
-def send_stars_invoice(chat_id: int, tier: str = "40"):
-    tiers = {
-        "40": {"title": "19 Credits", "stars": 40, "desc": "Generates ~5,700 words in your voice.", "payload": "pack_19"},
-        "100": {"title": "57 Credits", "stars": 100, "desc": "Generates ~17,100 words in your voice.", "payload": "pack_57"},
-        "250": {"title": "152 Credits", "stars": 250, "desc": "Generates ~45,600 words in your voice.", "payload": "pack_152"},
-    }
-    selected = tiers.get(tier, tiers["40"])
-    
+# --- TELEGRAM STARS INVOICE & CUSTOM PAYMENT SYSTEM ---
+def send_stars_invoice(chat_id: int, star_amount: int):
+    """Generates a dynamic Telegram Stars invoice based on any star count (Min: 40 Stars)."""
+    # 40 Stars = ~19 credits (approx 0.475 credits per star)
+    credits_amount = int(star_amount * 0.475)
+    if credits_amount < 1:
+        credits_amount = 1
+
     url = f"{TELEGRAM_API_URL}/sendInvoice"
     payload = {
         "chat_id": chat_id,
-        "title": f"StoryVoice: {selected['title']}",
-        "description": selected['desc'],
-        "payload": selected['payload'],
-        "currency": "XTR",
-        "prices": [{"label": selected['title'], "amount": selected['stars']}]
+        "title": f"StoryVoice: {credits_amount} Credits",
+        "description": f"Generates ~{credits_amount * 300:,} words in your cloned voice.",
+        "payload": f"custom_credits_{credits_amount}",
+        "currency": "XTR",  # Telegram Stars Currency
+        "prices": [{"label": f"{credits_amount} Premium Credits", "amount": star_amount}]
     }
     requests.post(url, json=payload, timeout=10)
 
@@ -177,7 +185,7 @@ def answer_pre_checkout_query(pre_checkout_query_id: str, ok: bool = True):
     requests.post(url, json={"pre_checkout_query_id": pre_checkout_query_id, "ok": ok}, timeout=5)
 
 
-# --- MAIN KEYBOARD UI ---
+# --- MAIN KEYBOARD & INLINE UI ---
 def get_main_keyboard():
     return {
         "keyboard": [
@@ -185,6 +193,16 @@ def get_main_keyboard():
             [{"text": "📊 My Status"}, {"text": "📝 Storytelling Tips"}]
         ],
         "resize_keyboard": True
+    }
+
+def get_buy_inline_keyboard():
+    return {
+        "inline_keyboard": [
+            [{"text": "⭐ 40 Stars (19 Credits)", "callback_data": "buy_40"}],
+            [{"text": "⭐ 100 Stars (57 Credits)", "callback_data": "buy_100"}],
+            [{"text": "⭐ 250 Stars (152 Credits)", "callback_data": "buy_250"}],
+            [{"text": "✏️ Enter Custom Amount", "callback_data": "buy_custom"}]
+        ]
     }
 
 
@@ -195,6 +213,7 @@ def webhook():
     if not data:
         return jsonify({"status": "ignored"}), 200
 
+    # 1. Handle Telegram Stars Pre-Checkout Verification
     if "pre_checkout_query" in data:
         answer_pre_checkout_query(data["pre_checkout_query"]["id"], ok=True)
         return jsonify({"status": "ok"}), 200
@@ -202,26 +221,50 @@ def webhook():
     raw_text = ""
     message = None
     
+    # 2. Extract Callback Query (Inline Keyboard Buttons)
     if "callback_query" in data:
         cb = data["callback_query"]
         answer_callback_query(cb["id"])
         chat_id = cb["message"]["chat"]["id"]
         user_id = cb["from"]["id"]
-        raw_text = cb.get("data", "")
+        cb_data = cb.get("data", "")
+
+        if cb_data.startswith("buy_"):
+            tier = cb_data.replace("buy_", "")
+            if tier == "custom":
+                set_user_state(user_id, "AWAITING_CUSTOM_STARS")
+                send_message(
+                    chat_id, 
+                    "💬 *Custom Payment*\n\nPlease reply with the number of Telegram Stars you would like to spend (Minimum: **40 Stars**)."
+                )
+            else:
+                send_stars_invoice(chat_id, int(tier))
+            return jsonify({"status": "ok"}), 200
+
+        raw_text = cb_data
+
+    # 3. Extract Direct Messages
     elif "message" in data:
         message = data["message"]
         chat_id = message["chat"]["id"]
         user_id = message["from"]["id"]
 
+        # Successful Telegram Stars Payment
         if "successful_payment" in message:
             payload = message["successful_payment"]["invoice_payload"]
-            credits_map = {"pack_19": 19, "pack_57": 57, "pack_152": 152}
-            added = credits_map.get(payload, 19)
+            
+            # Parse credit amount from dynamic payload
+            if payload.startswith("custom_credits_"):
+                added = int(payload.replace("custom_credits_", ""))
+            else:
+                credits_map = {"pack_19": 19, "pack_57": 57, "pack_152": 152}
+                added = credits_map.get(payload, 19)
+
             add_credits(user_id, added)
             send_message(chat_id, f"🎉 Payment Received! *{added} Premium Credits* added to your balance.", reply_markup=get_main_keyboard())
             return jsonify({"status": "ok"}), 200
 
-        # Voice/Audio Processing
+        # Voice/Audio Note Processing for Voice Cloning
         if "voice" in message or "audio" in message:
             file_obj = message.get("voice") or message.get("audio")
             send_message(chat_id, "⏳ *Processing your voice sample...*\nPlease wait a moment.")
@@ -229,18 +272,18 @@ def webhook():
                 audio_bytes, mime_type = download_telegram_file(file_obj["file_id"])
                 model_id = clone_voice_fish_audio(audio_bytes, title=f"user_{user_id}_voice", mime_type=mime_type)
                 
-                # Save persistent model ID to Upstash
+                # Save persistent model ID to Upstash Redis
                 set_user_model(user_id, model_id)
                 set_user_state(user_id, "IDLE")
                 
                 success_msg = (
                     "🎉 *Voice cloned successfully!*\n\n"
-                    "Your voice profile is saved in Upstash Redis! Send any text script (up to 300 words) and I will read it in your exact voice!"
+                    "Your voice profile is saved to your account. Send any text script (up to 300 words) and I will read it in your exact voice!"
                 )
                 send_message(chat_id, success_msg, reply_markup=get_main_keyboard())
             except Exception as e:
                 print(f"Voice cloning error: {e}")
-                send_message(chat_id, "❌ *Failed to clone voice sample.* Please make sure your recording is **at least 20 seconds long** in a quiet room.")
+                send_message(chat_id, "❌ *Failed to clone voice sample.* Please make sure your recording is **at least 15-20 seconds long** in a quiet room.")
             return jsonify({"status": "ok"}), 200
 
         raw_text = message.get("text", "").strip()
@@ -254,6 +297,22 @@ def webhook():
 
     clean_btn_text = re.sub(r'[^\w\s]', '', raw_text).strip().lower()
 
+    # Handle Custom Stars Input State
+    if get_user_state(user_id) == "AWAITING_CUSTOM_STARS":
+        if raw_text.isdigit():
+            star_val = int(raw_text)
+            if star_val < 40:
+                send_message(chat_id, "⚠️ Minimum amount is **40 Stars**. Please enter 40 or higher:")
+                return jsonify({"status": "ok"}), 200
+            
+            set_user_state(user_id, "IDLE")
+            send_stars_invoice(chat_id, star_val)
+            return jsonify({"status": "ok"}), 200
+        else:
+            send_message(chat_id, "⚠️ Invalid input. Please enter a valid number (e.g. 150):")
+            return jsonify({"status": "ok"}), 200
+
+    # 4. Standard Navigation Router
     if raw_text in ["/start", "i Help", "Help"] or clean_btn_text in ["start", "help"]:
         get_user_credits(user_id)
         welcome_text = (
@@ -271,7 +330,7 @@ def webhook():
         instructions = (
             "🎙 *Voice Cloning Instructions:*\n\n"
             "• *Environment:* Quiet background with zero noise or music.\n"
-            "• *Duration:* Record a clear **20 to 30 second** voice note.\n"
+            "• *Duration:* Record a clear **15 to 30 second** voice note.\n"
             "• *Tip:* Speak naturally at a steady, clear pace.\n\n"
             "👇 *Press the microphone button below to send your voice note now:*"
         )
@@ -279,7 +338,8 @@ def webhook():
         return jsonify({"status": "ok"}), 200
 
     if "buy credits" in clean_btn_text or raw_text == "/buy":
-        send_stars_invoice(chat_id, "40")
+        buy_text = "💳 *Select a Credit Package or Enter Custom Stars:*\n\nChoose an option below:"
+        send_message(chat_id, buy_text, reply_markup=get_buy_inline_keyboard())
         return jsonify({"status": "ok"}), 200
 
     if "my status" in clean_btn_text:
@@ -304,7 +364,7 @@ def webhook():
         send_message(chat_id, tips_text, reply_markup=get_main_keyboard())
         return jsonify({"status": "ok"}), 200
 
-    # TTS Generation
+    # 5. TTS Voice Audio Generation
     words = raw_text.split()
     if len(words) > 300:
         send_message(chat_id, f"⚠️ *Script too long!* Your text contains {len(words)} words. The maximum limit is 300 words per generation.")
