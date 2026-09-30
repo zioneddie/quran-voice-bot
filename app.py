@@ -14,11 +14,11 @@ MAX_WORDS = 300
 INITIAL_TRIALS = 3
 DAILY_ALLOWANCE = 2
 
-# Initialize Telebot with HTML parse mode
+# Initialize Telebot with HTML parse mode and threaded=False for synchronous Flask webhooks
 bot = telebot.TeleBot(BOT_TOKEN, parse_mode="HTML", threaded=False)
 app = Flask(__name__)
 
-# Simple in-memory state storage
+# In-memory user state database
 user_db = {}
 
 
@@ -83,7 +83,7 @@ def send_admin_alert(message_text: str):
             print(f"--> Failed to send admin alert: {e}", flush=True)
 
 
-def create_fish_voice_model(audio_bytes: bytes, filename: str = "voice.mp3") -> str:
+def create_fish_voice_model(audio_bytes: bytes, filename: str = "voice.ogg", mime_type: str = "audio/ogg") -> str:
     url = "https://api.fish.audio/model"
     headers = {"Authorization": f"Bearer {FISH_AUDIO_API_KEY}"}
     data = {
@@ -92,14 +92,17 @@ def create_fish_voice_model(audio_bytes: bytes, filename: str = "voice.mp3") -> 
         "train_mode": "fast",
         "visibility": "private"
     }
-    files = {"voices": (filename, audio_bytes, "audio/mpeg")}
+    files = [("voices", (filename, audio_bytes, mime_type))]
 
     try:
         response = requests.post(url, headers=headers, data=data, files=files, timeout=30)
+        print(f"--> Fish Audio API Response [{response.status_code}]: {response.text}", flush=True)
+        
         if response.status_code in [200, 201]:
-            return response.json().get("id")
+            res_json = response.json()
+            return res_json.get("_id") or res_json.get("id")
         elif response.status_code in [401, 402]:
-            send_admin_alert("🚨 <b>CRITICAL ALERT:</b> Fish Audio account is OUT OF CREDITS or API Key is invalid!")
+            send_admin_alert("🚨 CRITICAL ALERT: Fish Audio API Key invalid or out of credits!")
             return None
         else:
             print(f"--> Model creation failed: {response.status_code} - {response.text}", flush=True)
@@ -125,7 +128,7 @@ def generate_speech_fish(text: str, reference_id: str, chat_id: int) -> bytes:
         response = requests.post(url, json=payload, headers=headers, timeout=60)
 
         if response.status_code in [401, 402]:
-            send_admin_alert("🚨 <b>CRITICAL ALERT:</b> Fish Audio balance is empty!")
+            send_admin_alert("🚨 CRITICAL ALERT: Fish Audio balance is empty!")
             bot.send_message(
                 chat_id, 
                 "⚠️ Service is temporarily undergoing quick maintenance. Please try again in a few minutes!"
@@ -160,7 +163,7 @@ def get_main_keyboard():
     return markup
 
 
-# --- TELEGRAM BOT HANDLERS WITH DEBUG LOGGING ---
+# --- TELEGRAM BOT HANDLERS ---
 
 @bot.message_handler(commands=['start'])
 def handle_start(message):
@@ -244,7 +247,7 @@ def handle_tips_button(message):
         print(f"--> ERROR in handle_tips_button: {e}", flush=True)
 
 
-@bot.message_handler(func=lambda msg: msg.text == "ℹ️️ Help")
+@bot.message_handler(func=lambda msg: msg.text == "ℹ️ Help")
 def handle_help_button(message):
     try:
         bot.send_message(
@@ -267,10 +270,14 @@ def handle_voice_input(message):
     bot.send_message(chat_id, "⏳ <b>Processing your voice sample...</b> Please wait a moment.")
     
     try:
-        file_info = bot.get_file(message.voice.file_id if message.voice else message.audio.file_id)
+        file_obj = message.voice if message.voice else message.audio
+        file_info = bot.get_file(file_obj.file_id)
         downloaded_file = bot.download_file(file_info.file_path)
 
-        reference_id = create_fish_voice_model(downloaded_file)
+        filename = os.path.basename(file_info.file_path)
+        mime_type = "audio/ogg" if filename.endswith(".ogg") else "audio/mpeg"
+
+        reference_id = create_fish_voice_model(downloaded_file, filename=filename, mime_type=mime_type)
 
         if reference_id:
             user = get_user_data(chat_id)
@@ -281,7 +288,7 @@ def handle_voice_input(message):
                 "Now, send me any text script (up to 300 words) and I will read it in your voice!"
             )
         else:
-            bot.send_message(chat_id, "❌ Failed to process audio sample. Please try recording again in a quiet environment.")
+            bot.send_message(chat_id, "❌ Failed to process audio sample. Check Render logs for details.")
 
     except Exception as e:
         print(f"--> Error handling voice file: {e}", flush=True)
@@ -345,4 +352,4 @@ def webhook():
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port)
-            
+        
