@@ -14,11 +14,13 @@ MAX_WORDS = 300
 INITIAL_TRIALS = 3
 DAILY_ALLOWANCE = 2
 
-# Initialize Telebot with HTML parse mode for zero formatting crashes
+# Initialize Telebot with HTML parse mode
 bot = telebot.TeleBot(BOT_TOKEN, parse_mode="HTML")
 app = Flask(__name__)
 
+# Simple in-memory state storage
 user_db = {}
+
 
 def get_user_data(chat_id: int) -> dict:
     today = datetime.date.today().isoformat()
@@ -59,7 +61,7 @@ def validate_user_request(chat_id: int, text: str):
         return False, None, (
             "⚠️ <b>Daily limit reached!</b>\n\n"
             "You have used all your free generations for today. "
-            "Your 2 free daily trials reset tomorrow, or you can top up for unlimited access!"
+            "Your 2 free daily trials reset tomorrow!"
         )
 
 
@@ -78,7 +80,7 @@ def send_admin_alert(message_text: str):
         try:
             bot.send_message(ADMIN_ID, message_text)
         except Exception as e:
-            print(f"Failed to send admin alert: {e}")
+            print(f"--> Failed to send admin alert: {e}", flush=True)
 
 
 def create_fish_voice_model(audio_bytes: bytes, filename: str = "voice.mp3") -> str:
@@ -100,10 +102,10 @@ def create_fish_voice_model(audio_bytes: bytes, filename: str = "voice.mp3") -> 
             send_admin_alert("🚨 <b>CRITICAL ALERT:</b> Fish Audio account is OUT OF CREDITS or API Key is invalid!")
             return None
         else:
-            print(f"Model creation failed: {response.status_code} - {response.text}")
+            print(f"--> Model creation failed: {response.status_code} - {response.text}", flush=True)
             return None
     except Exception as e:
-        print(f"Error calling Fish Audio Model API: {e}")
+        print(f"--> Error calling Fish Audio Model API: {e}", flush=True)
         return None
 
 
@@ -123,7 +125,7 @@ def generate_speech_fish(text: str, reference_id: str, chat_id: int) -> bytes:
         response = requests.post(url, json=payload, headers=headers, timeout=60)
 
         if response.status_code in [401, 402]:
-            send_admin_alert("🚨 <b>CRITICAL ALERT:</b> Fish Audio balance is empty! Users cannot generate voices.")
+            send_admin_alert("🚨 <b>CRITICAL ALERT:</b> Fish Audio balance is empty!")
             bot.send_message(
                 chat_id, 
                 "⚠️ Service is temporarily undergoing quick maintenance. Please try again in a few minutes!"
@@ -137,8 +139,8 @@ def generate_speech_fish(text: str, reference_id: str, chat_id: int) -> bytes:
         return None
 
     except Exception as e:
-        print(f"Error calling Fish Audio TTS API: {e}")
-        bot.send_message(chat_id, "⚠️️ Service is temporarily busy. Please try again in a few minutes!")
+        print(f"--> Error calling Fish Audio TTS API: {e}", flush=True)
+        bot.send_message(chat_id, "⚠️ Service is temporarily busy. Please try again in a few minutes!")
         return None
 
 
@@ -158,10 +160,11 @@ def get_main_keyboard():
     return markup
 
 
-# --- TELEGRAM BOT HANDLERS ---
+# --- TELEGRAM BOT HANDLERS WITH DEBUG LOGGING ---
 
 @bot.message_handler(commands=['start'])
 def handle_start(message):
+    print(f"--> Received /start command from chat_id: {message.chat.id}", flush=True)
     get_user_data(message.chat.id)
     welcome_text = (
         "Welcome to <b>StoryVoice AI Studio!</b> 🎙✨\n\n"
@@ -172,67 +175,87 @@ def handle_start(message):
         "3️⃣ Receive your custom audio narration in seconds!\n\n"
         "🎁 <b>Free Tier:</b> You get <b>3 Welcome Bonus Credits</b> + <b>2 FREE generations</b> every single day!"
     )
-    bot.send_message(message.chat.id, welcome_text, reply_markup=get_main_keyboard())
+    try:
+        bot.send_message(message.chat.id, welcome_text, reply_markup=get_main_keyboard())
+        print("--> Sent welcome message successfully!", flush=True)
+    except Exception as e:
+        print(f"--> ERROR sending welcome message: {e}", flush=True)
 
 
 @bot.message_handler(func=lambda msg: msg.text == "🎙️ Clone My Voice")
 def handle_clone_button(message):
-    bot.send_message(
-        message.chat.id,
-        "🎙 <b>Send me a clear voice note!</b>\n\n"
-        "• Duration: 10 to 15 seconds\n"
-        "• Environment: Quiet background\n"
-        "• Tip: Speak naturally at a steady pace."
-    )
+    print(f"--> Received 'Clone My Voice' from chat_id: {message.chat.id}", flush=True)
+    try:
+        bot.send_message(
+            message.chat.id,
+            "🎙 <b>Send me a clear voice note!</b>\n\n"
+            "• Duration: 10 to 15 seconds\n"
+            "• Environment: Quiet background\n"
+            "• Tip: Speak naturally at a steady pace."
+        )
+    except Exception as e:
+        print(f"--> ERROR in handle_clone_button: {e}", flush=True)
 
 
 @bot.message_handler(func=lambda msg: msg.text == "📊 My Status")
 def handle_status_button(message):
-    user = get_user_data(message.chat.id)
-    has_voice = "✅ Saved" if user["voice_id"] else "❌ Not Cloned Yet"
-    
-    status_text = (
-        "📊 <b>Your Account Status</b>\n\n"
-        f"🎙️ <b>Voice Model:</b> {has_voice}\n"
-        f"🎁 <b>Welcome Credits:</b> {user['welcome_trials']} left\n"
-        f"🔄 <b>Daily Free Credits:</b> {user['daily_trials']}/2 left\n"
-        f"📝 <b>Max Script Length:</b> {MAX_WORDS} words\n\n"
-        "Need more credits or longer scripts? Tap <b>'💳 Buy Credits'</b>!"
-    )
-    bot.send_message(message.chat.id, status_text)
+    print(f"--> Received 'My Status' from chat_id: {message.chat.id}", flush=True)
+    try:
+        user = get_user_data(message.chat.id)
+        has_voice = "✅ Saved" if user["voice_id"] else "❌ Not Cloned Yet"
+        
+        status_text = (
+            "📊 <b>Your Account Status</b>\n\n"
+            f"🎙️ <b>Voice Model:</b> {has_voice}\n"
+            f"🎁 <b>Welcome Credits:</b> {user['welcome_trials']} left\n"
+            f"🔄 <b>Daily Free Credits:</b> {user['daily_trials']}/2 left\n"
+            f"📝 <b>Max Script Length:</b> {MAX_WORDS} words\n\n"
+            "Need more credits or longer scripts? Tap <b>'💳 Buy Credits'</b>!"
+        )
+        bot.send_message(message.chat.id, status_text)
+    except Exception as e:
+        print(f"--> ERROR in handle_status_button: {e}", flush=True)
 
 
 @bot.message_handler(func=lambda msg: msg.text == "💳 Buy Credits")
 def handle_buy_button(message):
-    bot.send_message(
-        message.chat.id,
-        "💳 <b>Upgrade Your Tier</b>\n\n"
-        "Get access to unlimited generations, longer scripts, and priority processing.\n\n"
-        "• <b>Minimum Tier:</b> 30 Telegram Stars\n\n"
-        "<i>(Telegram Stars payment integration active!)</i>"
-    )
+    try:
+        bot.send_message(
+            message.chat.id,
+            "💳 <b>Upgrade Your Tier</b>\n\n"
+            "Get access to unlimited generations, longer scripts, and priority processing.\n\n"
+            "• <b>Minimum Tier:</b> 30 Telegram Stars"
+        )
+    except Exception as e:
+        print(f"--> ERROR in handle_buy_button: {e}", flush=True)
 
 
 @bot.message_handler(func=lambda msg: msg.text == "📝 Storytelling Tips")
 def handle_tips_button(message):
-    bot.send_message(
-        message.chat.id,
-        "💡 <b>Storytelling & Social Media Tips:</b>\n\n"
-        "1. <b>Hooks:</b> Keep the first 3 seconds exciting!\n"
-        "2. <b>Punctuation:</b> Use commas and periods to guide the AI's natural pauses.\n"
-        "3. <b>Visuals:</b> Pair your generated audio with book quotes or aesthetic video loops for viral reach!"
-    )
+    try:
+        bot.send_message(
+            message.chat.id,
+            "💡 <b>Storytelling & Social Media Tips:</b>\n\n"
+            "1. <b>Hooks:</b> Keep the first 3 seconds exciting!\n"
+            "2. <b>Punctuation:</b> Use commas and periods to guide the AI's natural pauses.\n"
+            "3. <b>Visuals:</b> Pair your generated audio with book quotes or aesthetic video loops!"
+        )
+    except Exception as e:
+        print(f"--> ERROR in handle_tips_button: {e}", flush=True)
 
 
-@bot.message_handler(func=lambda msg: msg.text == "ℹ️ Help")
+@bot.message_handler(func=lambda msg: msg.text == "ℹ️️ Help")
 def handle_help_button(message):
-    bot.send_message(
-        message.chat.id,
-        "ℹ️ <b>Need Help?</b>\n\n"
-        "1. Click <b>'🎙️ Clone My Voice'</b> and record your voice.\n"
-        "2. Type or paste your story text (up to 300 words).\n"
-        "3. The bot will automatically generate audio in your cloned voice!"
-    )
+    try:
+        bot.send_message(
+            message.chat.id,
+            "ℹ️ <b>Need Help?</b>\n\n"
+            "1. Click <b>'🎙️ Clone My Voice'</b> and record your voice.\n"
+            "2. Type or paste your story text (up to 300 words).\n"
+            "3. The bot will automatically generate audio in your cloned voice!"
+        )
+    except Exception as e:
+        print(f"--> ERROR in handle_help_button: {e}", flush=True)
 
 
 # --- VOICE NOTE HANDLER ---
@@ -240,6 +263,7 @@ def handle_help_button(message):
 @bot.message_handler(content_types=['voice', 'audio'])
 def handle_voice_input(message):
     chat_id = message.chat.id
+    print(f"--> Received voice note from chat_id: {chat_id}", flush=True)
     bot.send_message(chat_id, "⏳ <b>Processing your voice sample...</b> Please wait a moment.")
     
     try:
@@ -260,7 +284,7 @@ def handle_voice_input(message):
             bot.send_message(chat_id, "❌ Failed to process audio sample. Please try recording again in a quiet environment.")
 
     except Exception as e:
-        print(f"Error handling voice file: {e}")
+        print(f"--> Error handling voice file: {e}", flush=True)
         bot.send_message(chat_id, "❌ Error receiving audio. Please try sending it again.")
 
 
@@ -270,6 +294,8 @@ def handle_voice_input(message):
 def handle_text_generation(message):
     chat_id = message.chat.id
     text = message.text.strip()
+    print(f"--> Received text generation request from chat_id: {chat_id}", flush=True)
+    
     user = get_user_data(chat_id)
 
     if not user["voice_id"]:
@@ -305,8 +331,13 @@ def index():
 def webhook():
     if request.is_json:
         json_string = request.get_data().decode('utf-8')
-        update = telebot.types.Update.de_json(json_string)
-        bot.process_new_updates([update])
+        print(f"--> Incoming Webhook Payload: {json_string}", flush=True)
+        try:
+            update = telebot.types.Update.de_json(json_string)
+            bot.process_new_updates([update])
+            print("--> Update processed successfully!", flush=True)
+        except Exception as e:
+            print(f"--> ERROR processing update: {e}", flush=True)
         return 'OK', 200
     return 'Invalid', 400
 
@@ -314,3 +345,4 @@ def webhook():
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port)
+            
