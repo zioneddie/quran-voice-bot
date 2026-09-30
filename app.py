@@ -33,17 +33,17 @@ def redis_command(command: list):
 
 def get_user_model(user_id: int) -> str:
     res = redis_command(["GET", f"user:{user_id}:model_id"])
-    return res if res else None
+    return str(res) if res else None
 
 def set_user_model(user_id: int, model_id: str):
-    redis_command(["SET", f"user:{user_id}:model_id", model_id])
+    redis_command(["SET", f"user:{user_id}:model_id", str(model_id)])
 
 def get_user_state(user_id: int) -> str:
     res = redis_command(["GET", f"user:{user_id}:state"])
-    return res if res else "IDLE"
+    return str(res) if res else "IDLE"
 
 def set_user_state(user_id: int, state: str):
-    redis_command(["SET", f"user:{user_id}:state", state])
+    redis_command(["SET", f"user:{user_id}:state", str(state)])
 
 
 # --- CREDIT & DAILY BALANCE LOGIC ---
@@ -93,15 +93,21 @@ def prepare_text_for_tts(text: str) -> str:
 
 
 # --- FISH AUDIO API INTEGRATION ---
-def clone_voice_fish_audio(file_bytes: bytes, title: str) -> str:
+def clone_voice_fish_audio(file_bytes: bytes, title: str, mime_type: str = "audio/ogg") -> str:
+    """Sends recorded user voice note to Fish Audio for instant voice cloning."""
     url = "https://api.fish.audio/model"
     headers = {"Authorization": f"Bearer {FISH_AUDIO_API_KEY}"}
-    files = {'voices': ('sample.mp3', file_bytes, 'audio/mpeg')}
+    
+    # Correct filename extension based on actual Telegram format (ogg or mp3)
+    filename = "voice.ogg" if "ogg" in mime_type or "opus" in mime_type else "voice.mp3"
+    files = {'voices': (filename, file_bytes, mime_type)}
     data = {'type': 'tts', 'title': title}
     
-    res = requests.post(url, headers=headers, data=data, files=files, timeout=30)
+    res = requests.post(url, headers=headers, data=data, files=files, timeout=45)
     if res.status_code not in [200, 201]:
-        raise Exception(f"Fish Audio Model API Error ({res.status_code}): {res.text}")
+        print(f"Fish Audio Error Response: {res.text}")
+        raise Exception(f"Fish Audio Error ({res.status_code}): {res.text}")
+        
     res_data = res.json()
     return res_data.get("_id") or res_data.get("id")
 
@@ -115,9 +121,9 @@ def generate_voice_fish_audio(text: str, reference_id: str = None) -> bytes:
     if reference_id:
         payload["reference_id"] = reference_id
 
-    res = requests.post(url, json=payload, headers=headers, timeout=30)
+    res = requests.post(url, json=payload, headers=headers, timeout=45)
     if res.status_code != 200:
-        raise Exception(f"Fish Audio TTS API Error ({res.status_code}): {res.text}")
+        raise Exception(f"Fish Audio TTS Error ({res.status_code}): {res.text}")
     return res.content
 
 
@@ -134,17 +140,19 @@ def send_audio_bytes(chat_id: int, audio_bytes: bytes, filename: str = "voice.mp
     files = {'audio': (filename, io.BytesIO(audio_bytes), 'audio/mpeg')}
     requests.post(url, data={'chat_id': chat_id}, files=files, timeout=30)
 
-def download_telegram_file(file_id: str) -> bytes:
+def download_telegram_file(file_id: str):
     res = requests.get(f"{TELEGRAM_API_URL}/getFile?file_id={file_id}", timeout=10).json()
     file_path = res["result"]["file_path"]
-    return requests.get(f"https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}/{file_path}", timeout=30).content
+    mime_type = "audio/ogg" if file_path.endswith(".ogg") or file_path.endswith(".opus") else "audio/mpeg"
+    content = requests.get(f"https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}/{file_path}", timeout=30).content
+    return content, mime_type
 
 def answer_callback_query(callback_query_id: str):
     url = f"{TELEGRAM_API_URL}/answerCallbackQuery"
     requests.post(url, json={"callback_query_id": callback_query_id}, timeout=5)
 
 
-# --- TELEGRAM STARS INVOICE PAYMENT SYSTEM ---
+# --- TELEGRAM STARS INVOICE ---
 def send_stars_invoice(chat_id: int, tier: str = "40"):
     tiers = {
         "40": {"title": "19 Credits", "stars": 40, "desc": "Generates ~5,700 words in your voice.", "payload": "pack_19"},
@@ -159,7 +167,7 @@ def send_stars_invoice(chat_id: int, tier: str = "40"):
         "title": f"StoryVoice: {selected['title']}",
         "description": selected['desc'],
         "payload": selected['payload'],
-        "currency": "XTR",  # Telegram Stars Currency
+        "currency": "XTR",
         "prices": [{"label": selected['title'], "amount": selected['stars']}]
     }
     requests.post(url, json=payload, timeout=10)
@@ -169,7 +177,7 @@ def answer_pre_checkout_query(pre_checkout_query_id: str, ok: bool = True):
     requests.post(url, json={"pre_checkout_query_id": pre_checkout_query_id, "ok": ok}, timeout=5)
 
 
-# --- TELEGRAM KEYBOARD UI ---
+# --- MAIN KEYBOARD UI ---
 def get_main_keyboard():
     return {
         "keyboard": [
@@ -180,19 +188,17 @@ def get_main_keyboard():
     }
 
 
-# --- WEBHOOK ROUTER ---
+# --- MAIN WEBHOOK ROUTER ---
 @app.route('/webhook', methods=['POST'])
 def webhook():
     data = request.get_json(force=True, silent=True)
     if not data:
         return jsonify({"status": "ignored"}), 200
 
-    # 1. Handle Telegram Stars Pre-Checkout
     if "pre_checkout_query" in data:
         answer_pre_checkout_query(data["pre_checkout_query"]["id"], ok=True)
         return jsonify({"status": "ok"}), 200
 
-    # 2. Extract Message / Callback Data
     raw_text = ""
     message = None
     
@@ -207,7 +213,6 @@ def webhook():
         chat_id = message["chat"]["id"]
         user_id = message["from"]["id"]
 
-        # Successful Stars Payment
         if "successful_payment" in message:
             payload = message["successful_payment"]["invoice_payload"]
             credits_map = {"pack_19": 19, "pack_57": 57, "pack_152": 152}
@@ -216,24 +221,26 @@ def webhook():
             send_message(chat_id, f"🎉 Payment Received! *{added} Premium Credits* added to your balance.", reply_markup=get_main_keyboard())
             return jsonify({"status": "ok"}), 200
 
-        # Voice/Audio File Upload for Voice Cloning
+        # Voice/Audio Processing
         if "voice" in message or "audio" in message:
             file_obj = message.get("voice") or message.get("audio")
             send_message(chat_id, "⏳ *Processing your voice sample...*\nPlease wait a moment.")
             try:
-                audio_bytes = download_telegram_file(file_obj["file_id"])
-                model_id = clone_voice_fish_audio(audio_bytes, title=f"user_{user_id}_voice")
+                audio_bytes, mime_type = download_telegram_file(file_obj["file_id"])
+                model_id = clone_voice_fish_audio(audio_bytes, title=f"user_{user_id}_voice", mime_type=mime_type)
+                
+                # Save persistent model ID to Upstash
                 set_user_model(user_id, model_id)
                 set_user_state(user_id, "IDLE")
                 
                 success_msg = (
                     "🎉 *Voice cloned successfully!*\n\n"
-                    "Your voice profile is saved to your account. Send any text script (up to 300 words) and I will read it in your exact voice!"
+                    "Your voice profile is saved in Upstash Redis! Send any text script (up to 300 words) and I will read it in your exact voice!"
                 )
                 send_message(chat_id, success_msg, reply_markup=get_main_keyboard())
             except Exception as e:
                 print(f"Voice cloning error: {e}")
-                send_message(chat_id, "❌ *Failed to clone voice sample.* Please send a clear 15-30s recording in a quiet room.")
+                send_message(chat_id, "❌ *Failed to clone voice sample.* Please make sure your recording is **at least 20 seconds long** in a quiet room.")
             return jsonify({"status": "ok"}), 200
 
         raw_text = message.get("text", "").strip()
@@ -245,10 +252,8 @@ def webhook():
     if not raw_text:
         return jsonify({"status": "ok"}), 200
 
-    # Sanitize inputs to allow flexible button matching
     clean_btn_text = re.sub(r'[^\w\s]', '', raw_text).strip().lower()
 
-    # 3. Route Commands & Menu Buttons
     if raw_text in ["/start", "i Help", "Help"] or clean_btn_text in ["start", "help"]:
         get_user_credits(user_id)
         welcome_text = (
@@ -266,7 +271,7 @@ def webhook():
         instructions = (
             "🎙 *Voice Cloning Instructions:*\n\n"
             "• *Environment:* Quiet background with zero noise or music.\n"
-            "• *Duration:* Record a clear 15 to 30 second voice note.\n"
+            "• *Duration:* Record a clear **20 to 30 second** voice note.\n"
             "• *Tip:* Speak naturally at a steady, clear pace.\n\n"
             "👇 *Press the microphone button below to send your voice note now:*"
         )
@@ -299,7 +304,7 @@ def webhook():
         send_message(chat_id, tips_text, reply_markup=get_main_keyboard())
         return jsonify({"status": "ok"}), 200
 
-    # 4. Generate TTS Voice Audio
+    # TTS Generation
     words = raw_text.split()
     if len(words) > 300:
         send_message(chat_id, f"⚠️ *Script too long!* Your text contains {len(words)} words. The maximum limit is 300 words per generation.")
@@ -341,3 +346,4 @@ def home():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
+    
