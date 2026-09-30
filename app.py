@@ -8,13 +8,15 @@ from telebot import types
 # --- ENVIRONMENT VARIABLES & CONFIGURATION ---
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN") or os.environ.get("BOT_TOKEN")
 FISH_AUDIO_API_KEY = os.environ.get("FISH_AUDIO_API_KEY")
-ADMIN_ID = int(os.environ.get("ADMIN_ID", "0"))
+
+# Defaulting ADMIN_ID to your exact Telegram Chat ID
+ADMIN_ID = int(os.environ.get("ADMIN_ID", "5982017489"))
 
 MAX_WORDS = 300
 INITIAL_TRIALS = 3
 DAILY_ALLOWANCE = 2
 
-# Initialize Telebot with HTML parse mode and threaded=False for synchronous Flask webhooks
+# Initialize Telebot with HTML parse mode and threaded=False for synchronous webhooks
 bot = telebot.TeleBot(BOT_TOKEN, parse_mode="HTML", threaded=False)
 app = Flask(__name__)
 
@@ -42,6 +44,10 @@ def get_user_data(chat_id: int) -> dict:
 
 
 def validate_user_request(chat_id: int, text: str):
+    # ADMIN BYPASS: Unlimited words & unlimited trials for the boss
+    if ADMIN_ID != 0 and chat_id == ADMIN_ID:
+        return True, "admin", None
+
     words = text.strip().split()
     word_count = len(words)
     
@@ -71,6 +77,7 @@ def deduct_user_trial(chat_id: int, trial_type: str):
         user["welcome_trials"] -= 1
     elif trial_type == "daily":
         user["daily_trials"] -= 1
+    # 'admin' type bypasses deduction completely
 
 
 # --- FISH AUDIO API INTEGRATION ---
@@ -207,14 +214,22 @@ def handle_status_button(message):
         user = get_user_data(message.chat.id)
         has_voice = "✅ Saved" if user["voice_id"] else "❌ Not Cloned Yet"
         
-        status_text = (
-            "📊 <b>Your Account Status</b>\n\n"
-            f"🎙️ <b>Voice Model:</b> {has_voice}\n"
-            f"🎁 <b>Welcome Credits:</b> {user['welcome_trials']} left\n"
-            f"🔄 <b>Daily Free Credits:</b> {user['daily_trials']}/2 left\n"
-            f"📝 <b>Max Script Length:</b> {MAX_WORDS} words\n\n"
-            "Need more credits or longer scripts? Tap <b>'💳 Buy Credits'</b>!"
-        )
+        if ADMIN_ID != 0 and message.chat.id == ADMIN_ID:
+            status_text = (
+                "👑 <b>Admin Account Status</b>\n\n"
+                f"🎙️ <b>Voice Model:</b> {has_voice}\n"
+                "⚡ <b>Access Level:</b> Unlimited Words & Unlimited Generations\n"
+                "🛡️ <b>Role:</b> System Administrator"
+            )
+        else:
+            status_text = (
+                "📊 <b>Your Account Status</b>\n\n"
+                f"🎙️ <b>Voice Model:</b> {has_voice}\n"
+                f"🎁 <b>Welcome Credits:</b> {user['welcome_trials']} left\n"
+                f"🔄 <b>Daily Free Credits:</b> {user['daily_trials']}/2 left\n"
+                f"📝 <b>Max Script Length:</b> {MAX_WORDS} words\n\n"
+                "Need more credits or longer scripts? Tap <b>'💳 Buy Credits'</b>!"
+            )
         bot.send_message(message.chat.id, status_text)
     except Exception as e:
         print(f"--> ERROR in handle_status_button: {e}", flush=True)
@@ -285,7 +300,7 @@ def handle_voice_input(message):
             bot.send_message(
                 chat_id,
                 "🎉 <b>Voice cloned successfully!</b>\n\n"
-                "Now, send me any text script (up to 300 words) and I will read it in your voice!"
+                "Now, send me any text script and I will read it in your voice!"
             )
         else:
             bot.send_message(chat_id, "❌ Failed to process audio sample. Check Render logs for details.")
@@ -352,4 +367,4 @@ def webhook():
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port)
-        
+    
