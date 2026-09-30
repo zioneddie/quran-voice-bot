@@ -1,114 +1,132 @@
 import os
 import re
+import io
 import requests
 from flask import Flask, request, jsonify
 
 app = Flask(__name__)
 
-# --- CONFIGURATION ---
+# --- CONFIGURATION FROM RENDER ENVIRONMENT ---
+ADMIN_ID = os.getenv("ADMIN_ID", "")
+FISH_AUDIO_API_KEY = os.getenv("FISH_AUDIO_API_KEY")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-REPLICATE_API_TOKEN = os.getenv("REPLICATE_API_TOKEN")
-# Default speaker reference audio URL (replace with your fallback voice sample if needed)
-DEFAULT_SPEAKER_WAV = os.getenv("DEFAULT_SPEAKER_WAV", "https://replicate.delivery/pbxt/Jt75wUx3f2xP3/sample.wav")
+UPSTASH_REDIS_REST_URL = os.getenv("UPSTASH_REDIS_REST_URL")
+UPSTASH_REDIS_REST_TOKEN = os.getenv("UPSTASH_REDIS_REST_TOKEN")
 
 TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
 
 
-# --- TEXT PREPROCESSING FOR NATURAL VOICE ---
+# --- UPSTASH REDIS HELPERS (REST API) ---
+def redis_command(command: list):
+    """Executes Redis commands via Upstash REST API."""
+    if not UPSTASH_REDIS_REST_URL or not UPSTASH_REDIS_REST_TOKEN:
+        return None
+    
+    headers = {"Authorization": f"Bearer {UPSTASH_REDIS_REST_TOKEN}"}
+    try:
+        response = requests.post(UPSTASH_REDIS_REST_URL, json=command, headers=headers)
+        res_data = response.json()
+        return res_data.get("result")
+    except Exception as e:
+        print(f"Upstash Redis Error: {e}")
+        return None
+
+def get_user_model(user_id: int) -> str:
+    return redis_command(["GET", f"user:{user_id}:model_id"])
+
+def set_user_model(user_id: int, model_id: str):
+    redis_command(["SET", f"user:{user_id}:model_id", model_id])
+
+
+# --- ENHANCED TEXT PREPROCESSING FOR NATURAL FISH AUDIO EXPRESSION ---
 def prepare_text_for_tts(text: str) -> str:
     """
-    Cleans and adds expressive punctuation/pauses 
-    to make XTTS-v2 sound less robotic.
+    Formats raw text scripts to force human expression, pitch variation,
+    and dramatic pauses specifically for Fish Audio synthesis.
     """
     if not text:
         return ""
-    
-    # 1. Clean extra spaces
+
+    # 1. Standardize whitespace
     text = re.sub(r'\s+', ' ', text.strip())
-    
-    # 2. Add dramatic pauses after greetings
-    text = re.sub(r'^(hello|hi|hey|welcome|listen)([\s!,.?])', r'\1... ', text, flags=re.IGNORECASE)
-    
-    # 3. Add micro-pauses before common connecting words
-    text = re.sub(r',\s+(but|however|so|and|then)\b', r'... \1', text, flags=re.IGNORECASE)
-    
-    # 4. Convert dashes into pauses
-    text = re.sub(r'\s*--\s*|\s*—\s*', '... ', text)
-    
-    # 5. Ensure sentence ends with punctuation so pitch resets correctly
+
+    # 2. Add realistic breath/thought pauses after openings/greetings
+    text = re.sub(
+        r'^(hello|hi|hey|welcome|listen|look|so|well)([\s!,.?])',
+        r'\1... ',
+        text,
+        flags=re.IGNORECASE
+    )
+
+    # 3. Force micro-pauses before connecting words to create cadence
+    text = re.sub(
+        r'[,;]?\s+(but|however|so|because|although|and|then|instead|meanwhile)\b',
+        r', ... \1',
+        text,
+        flags=re.IGNORECASE
+    )
+
+    # 4. Turn hyphens and dashes into clear dramatic pauses
+    text = re.sub(r'\s*--\s*|\s*—\s*|\s*-\s*', ' ... ', text)
+
+    # 5. Insert steady pause points between multi-sentence statements
+    text = re.sub(r'([.!?])\s*', r'\1 ... ', text)
+
+    # 6. Ensure full-stop ending for accurate pitch decay at speech completion
     if text and text[-1] not in '.!?':
         text += '.'
-        
+
+    # Clean up redundant dots
+    text = re.sub(r'\.{4,}', '...', text)
+
     return text
 
 
-# --- REPLICATE API CALL ---
-def generate_voice(text: str, speaker_wav: str) -> str:
+# --- FISH AUDIO TTS API INTEGRATION ---
+def generate_voice_fish_audio(text: str, reference_id: str = None) -> bytes:
     """
-    Calls Replicate XTTS-v2 API and returns the generated audio URL.
+    Sends script to Fish Audio's API and returns standard audio bytes (MP3).
     """
-    url = "https://api.replicate.com/v1/predictions"
+    url = "https://api.fish.audio/v1/tts"
+    
     headers = {
-        "Authorization": f"Bearer {REPLICATE_API_TOKEN}",
+        "Authorization": f"Bearer {FISH_AUDIO_API_KEY}",
         "Content-Type": "application/json"
     }
     
-    # Payload for XTTS-v2
     payload = {
-        "version": "6841db4583d3d83f72109f13a49648e1a144130509865c977431e780c10b7a42",  # lucataco/xtts-v2
-        "input": {
-            "text": text,
-            "speaker": speaker_wav,
-            "language": "en"
-        }
+        "text": text,
+        "format": "mp3"
     }
     
-    # Post request to start prediction
+    # Pass cloned voice reference ID if stored in Redis for user
+    if reference_id:
+        payload["reference_id"] = reference_id
+
     response = requests.post(url, json=payload, headers=headers)
-    response_data = response.json()
     
-    if "id" not in response_data:
-        raise Exception(f"Replicate API Error: {response_data}")
+    if response.status_code != 200:
+        raise Exception(f"Fish Audio API Error ({response.status_code}): {response.text}")
         
-    prediction_id = response_data["id"]
-    get_url = f"https://api.replicate.com/v1/predictions/{prediction_id}"
-    
-    # Poll until execution finishes
-    import time
-    while True:
-        poll_res = requests.get(get_url, headers=headers).json()
-        status = poll_res.get("status")
-        
-        if status == "succeeded":
-            # Returns the audio file URL
-            return poll_res.get("output")
-        elif status == "failed":
-            raise Exception("Voice generation failed on Replicate.")
-            
-        time.sleep(1)
+    return response.content
 
 
-# --- TELEGRAM HELPER FUNCTIONS ---
-def send_audio(chat_id: int, audio_url: str):
-    """Sends voice/audio message back to Telegram user."""
+# --- TELEGRAM API HELPERS ---
+def send_audio_bytes(chat_id: int, audio_bytes: bytes, filename: str = "voice.mp3"):
+    """Posts binary audio directly to the user chat."""
     url = f"{TELEGRAM_API_URL}/sendAudio"
-    payload = {
-        "chat_id": chat_id,
-        "audio": audio_url
-    }
-    requests.post(url, json=payload)
+    files = {'audio': (filename, io.BytesIO(audio_bytes), 'audio/mpeg')}
+    data = {'chat_id': chat_id}
+    requests.post(url, data=data, files=files)
 
 def send_message(chat_id: int, text: str):
-    """Sends text message back to Telegram user."""
+    """Posts plain text messages to the user chat."""
     url = f"{TELEGRAM_API_URL}/sendMessage"
-    payload = {
-        "chat_id": chat_id,
-        "text": text
-    }
+    payload = {"chat_id": chat_id, "text": text}
     requests.post(url, json=payload)
 
 
-# --- MAIN WEBHOOK ENDPOINT ---
+# --- MAIN TELEGRAM WEBHOOK HANDLER ---
 @app.route('/webhook', methods=['POST'])
 def webhook():
     data = request.get_json()
@@ -118,29 +136,57 @@ def webhook():
 
     message = data["message"]
     chat_id = message["chat"]["id"]
-    raw_text = message.get("text", "")
-
-    # Handle /start command
-    if raw_text == "/start":
-        send_message(chat_id, "Welcome! Send me any text and I will generate natural AI voice audio for you.")
-        return jsonify({"status": "ok"}), 200
+    user_id = message["from"]["id"]
+    raw_text = message.get("text", "").strip()
 
     if not raw_text:
-        send_message(chat_id, "Please send a text message.")
         return jsonify({"status": "ok"}), 200
 
+    # 1. Menu Buttons & Commands Handler
+    if raw_text == "/start":
+        send_message(chat_id, "Welcome! Send me any text script and I will read it in a natural voice for you.")
+        return jsonify({"status": "ok"}), 200
+
+    if raw_text in ["💳 Buy Credits", "Buy Credits"]:
+        send_message(chat_id, "💳 Buy Credits menu coming soon! Telegram Stars payment integration in progress.")
+        return jsonify({"status": "ok"}), 200
+
+    if raw_text in ["📊 My Status", "My Status"]:
+        is_admin = str(user_id) == str(ADMIN_ID)
+        user_model = get_user_model(user_id)
+        
+        status_text = (
+            f"👑 {'Admin Account Status' if is_admin else 'User Status'}\n\n"
+            f"🎙 Voice Model: {'✅ Set' if user_model else '❌ Not Cloned Yet'}\n"
+            f"⚡ Access Level: {'Unlimited Words' if is_admin else 'Standard Free Tier'}\n"
+            f"🛡 Role: {'System Administrator' if is_admin else 'Standard User'}"
+        )
+        send_message(chat_id, status_text)
+        return jsonify({"status": "ok"}), 200
+
+    if raw_text in ["📝 Storytelling Tips", "Storytelling Tips"]:
+        tips_text = (
+            "💡 Storytelling & Social Media Tips:\n\n"
+            "1. Hooks: Keep the first 3 seconds exciting!\n"
+            "2. Punctuation: Use commas and periods to guide the AI's natural pauses.\n"
+            "3. Visuals: Pair your generated audio with book quotes or aesthetic video loops!"
+        )
+        send_message(chat_id, tips_text)
+        return jsonify({"status": "ok"}), 200
+
+    # 2. TTS Voice Generation Handler
     try:
-        # 1. Process text to add pauses/punctuation for natural flow
+        user_voice_id = get_user_model(user_id)
+        
+        # Preprocess input text to insert expressive pause markers
         enhanced_text = prepare_text_for_tts(raw_text)
-
-        # 2. Call Replicate API to generate audio
-        audio_url = generate_voice(enhanced_text, DEFAULT_SPEAKER_WAV)
-
-        # 3. Send audio back to Telegram
-        send_audio(chat_id, audio_url)
+        
+        # Generate and transmit audio
+        audio_data = generate_voice_fish_audio(enhanced_text, reference_id=user_voice_id)
+        send_audio_bytes(chat_id, audio_data)
 
     except Exception as e:
-        print(f"Error processing message: {e}")
+        print(f"Error processing voice generation: {e}")
         send_message(chat_id, "Sorry, something went wrong while generating the voice.")
 
     return jsonify({"status": "ok"}), 200
