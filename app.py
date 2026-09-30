@@ -3,6 +3,8 @@ import re
 import io
 import time
 import requests
+import wave
+import struct
 from flask import Flask, request, jsonify
 
 app = Flask(__name__)
@@ -76,7 +78,7 @@ def add_credits(user_id: int, amount: int):
     redis_command(["SET", f"user:{user_id}:credits", credits + amount])
 
 
-# --- CLEAN PREPROCESSING (FIXES AI HALLUCINATIONS & ACCENT GLITCHES) ---
+# --- TEXT PREPROCESSING & CHUNKING ---
 def prepare_text_for_tts(text: str) -> str:
     if not text:
         return ""
@@ -116,7 +118,7 @@ def split_text_into_chunks(text: str, max_chars: int = 250) -> list:
     return chunks if chunks else [text]
 
 
-# --- FISH AUDIO API ---
+# --- FISH AUDIO API INTEGRATION ---
 def clone_voice_fish_audio(file_bytes: bytes, title: str, mime_type: str = "audio/ogg") -> str:
     url = "https://api.fish.audio/model"
     headers = {"Authorization": f"Bearer {FISH_AUDIO_API_KEY}"}
@@ -144,7 +146,13 @@ def generate_single_tts_chunk(text: str, reference_id: str = None) -> bytes:
         "Authorization": f"Bearer {FISH_AUDIO_API_KEY}",
         "Content-Type": "application/json"
     }
-    payload = {"text": text, "format": "mp3"}
+    
+    # "speed": 0.9 slows the overall pacing down slightly for a more deliberate Replicate-like rhythm
+    payload = {
+        "text": text,
+        "format": "mp3",
+        "speed": 0.9
+    }
     if reference_id:
         payload["reference_id"] = reference_id
 
@@ -155,7 +163,7 @@ def generate_single_tts_chunk(text: str, reference_id: str = None) -> bytes:
 
 
 def generate_voice_fish_audio(text: str, reference_id: str = None) -> bytes:
-    """Handles long texts by generating clean chunked audio and joining the byte outputs."""
+    """Generates clean chunked audio and joins byte outputs for seamless playback."""
     chunks = split_text_into_chunks(text)
     combined_audio = io.BytesIO()
 
@@ -166,7 +174,7 @@ def generate_voice_fish_audio(text: str, reference_id: str = None) -> bytes:
     return combined_audio.getvalue()
 
 
-# --- TELEGRAM HELPERS ---
+# --- TELEGRAM API HELPERS ---
 def send_message(chat_id: int, text: str, reply_markup: dict = None):
     url = f"{TELEGRAM_API_URL}/sendMessage"
     payload = {"chat_id": chat_id, "text": text, "parse_mode": "Markdown"}
@@ -217,7 +225,7 @@ def answer_pre_checkout_query(pre_checkout_query_id: str, ok: bool = True):
     requests.post(url, json={"pre_checkout_query_id": pre_checkout_query_id, "ok": ok}, timeout=5)
 
 
-# --- KEYBOARDS ---
+# --- MAIN KEYBOARDS ---
 def get_main_keyboard():
     return {
         "keyboard": [
@@ -238,7 +246,7 @@ def get_buy_inline_keyboard():
     }
 
 
-# --- WEBHOOK ROUTE ---
+# --- WEBHOOK ROUTER ---
 @app.route('/webhook', methods=['POST'])
 def webhook():
     data = request.get_json(force=True, silent=True)
@@ -389,7 +397,7 @@ def webhook():
         send_message(chat_id, tips_text, reply_markup=get_main_keyboard())
         return jsonify({"status": "ok"}), 200
 
-    # TTS Generation
+    # TTS Generation Router
     words = raw_text.split()
     if len(words) > 300:
         send_message(chat_id, f"⚠️ *Script too long!* Your text contains {len(words)} words. The maximum limit is 300 words per generation.")
@@ -433,4 +441,4 @@ def home():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
-                 
+                     
