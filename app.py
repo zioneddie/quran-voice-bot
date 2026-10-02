@@ -174,22 +174,22 @@ def webhook():
             else: send_invoice(c_id, int(tier))
             return jsonify({"status": "ok"}), 200
 
-        elif cb_data.startswith("voice_set_"):
-            set_db(u_id, "selected_voice", cb_data.replace("voice_set_", ""))
-            send_msg(c_id, "🎙 <b>Active Voice Updated!</b>\n\nAll future scripts will use this profile:", reply_markup=get_voice_kb(u_id))
-            return jsonify({"status": "ok"}), 200
-        raw_text = cb_data
-
-    elif "message" in data:
-        msg = data["message"]
-        c_id, u_id = msg["chat"]["id"], msg["from"]["id"]
-
-        if "successful_payment" in msg:
-            p = msg["successful_payment"]["invoice_payload"]
-            added = int(p.replace("custom_credits_", "")) if p.startswith("custom_credits_") else {"pack_19":19, "pack_57":57, "pack_152":152}.get(p, 19)
-            add_credits(u_id, added)
-            send_msg(c_id, f"🎉 Payment Received! <b>{added} Premium Credits</b> added.", reply_markup=get_main_kb())
-            return jsonify({"status": "ok"}), 200
+        elif cb_data.startswith("voice_set_"):    if raw_text in ["/start", "i Help", "Help"] or clean_btn in ["start", "help"]:
+        get_user_credits(u_id)
+        welcome = (
+            "🎙 <b>Turn Written Ideas Into Studio-Grade Voiceovers—In Seconds.</b>\n\n"
+            "Clone your own voice with 99% accuracy or deploy studio AI voice actors for your Telegram channels, TikToks, and podcasts.\n\n"
+            "⚡ <b>What You Get Today:</b>\n"
+            "• <b>3 Free Studio Generations</b> ready on your account.\n"
+            "• <b>Instant Voice Cloning:</b> Send a 15s voice note to unlock your digital twin.\n"
+            "• <b>Multi-Voice Studio:</b> Switch between your cloned voice and standard AI narrators seamlessly.\n"
+            "• <b>Zero Rendering Delay:</b> Render full 300-word audio scripts delivered in seconds.\n\n"
+            "🎁 <i>Daily Balance Refill:</i> 2 Free generations refreshed every 24 hours.\n\n"
+            "👇 <b>Tap '🎙 Clone My Voice' below or pick a preset voice in '🎧 Voice Settings':</b>"
+        )
+        send_msg(c_id, welcome, reply_markup=get_main_kb())
+        return jsonify({"status": "ok"}), 200
+        
 
         if "voice" in msg or "audio" in msg:
             f_obj = msg.get("voice") or msg.get("audio")
