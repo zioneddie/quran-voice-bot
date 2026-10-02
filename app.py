@@ -11,7 +11,6 @@ UPSTASH_REDIS_REST_URL = (os.getenv("UPSTASH_REDIS_REST_URL") or "").strip()
 UPSTASH_REDIS_REST_TOKEN = (os.getenv("UPSTASH_REDIS_REST_TOKEN") or "").strip()
 TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
 
-# Default engine keys mapped to friendly display labels
 DEFAULT_VOICES = {
     "voice_adrian": "Adrian (Deep Male)",
     "voice_selene": "Selene (Female Storyteller)",
@@ -38,9 +37,7 @@ def get_active_voice_id(u_id: int):
     selected = get_db(u_id, "selected_voice", "CLONED")
     if selected == "CLONED":
         cloned = get_db(u_id, "model_id")
-        if cloned:
-            return str(cloned)
-    # Return None for standard preset voices to utilize Fish Audio base engine safely
+        if cloned: return str(cloned)
     return None
 
 def get_user_credits(u_id: int) -> int:
@@ -109,6 +106,15 @@ def tg_req(method: str, payload: dict = None, files: dict = None, data: dict = N
 def send_msg(c_id, text, reply_markup=None):
     return tg_req("sendMessage", {"chat_id": c_id, "text": text, "parse_mode": "HTML", "reply_markup": reply_markup})
 
+def edit_msg(c_id, m_id, text, reply_markup=None):
+    return tg_req("editMessageText", {"chat_id": c_id, "message_id": m_id, "text": text, "parse_mode": "HTML", "reply_markup": reply_markup})
+
+def delete_msg(c_id, m_id):
+    return tg_req("deleteMessage", {"chat_id": c_id, "message_id": m_id})
+
+def send_chat_action(c_id, action="record_voice"):
+    return tg_req("sendChatAction", {"chat_id": c_id, "action": action})
+
 def send_audio(c_id, audio_bytes):
     files = {'audio': ("StoryVoice.mp3", io.BytesIO(audio_bytes), 'audio/mpeg')}
     tg_req("sendAudio", files=files, data={'chat_id': c_id, 'title': 'StoryVoice Audio', 'performer': 'StoryVoice AI'})
@@ -140,7 +146,7 @@ def get_buy_kb():
     return {"inline_keyboard": [[{"text": "⭐ 40 Stars (19 Credits)", "callback_data": "buy_40"}],
                                 [{"text": "⭐ 100 Stars (57 Credits)", "callback_data": "buy_100"}],
                                 [{"text": "⭐ 250 Stars (152 Credits)", "callback_data": "buy_250"}],
-                                [{"text": "✏️️ Enter Custom Amount", "callback_data": "buy_custom"}]]}
+                                [{"text": "✏ Enter Custom Amount", "callback_data": "buy_custom"}]]}
 
 def get_voice_kb(u_id: int):
     curr = get_db(u_id, "selected_voice", "CLONED")
@@ -166,20 +172,25 @@ def webhook():
     if "callback_query" in data:
         cb = data["callback_query"]
         c_id, u_id, cb_data = cb["message"]["chat"]["id"], cb["from"]["id"], cb.get("data", "")
+        m_id = cb["message"]["message_id"]
         tg_req("answerCallbackQuery", {"callback_query_id": cb["id"]})
 
         if cb_data.startswith("buy_"):
             tier = cb_data.replace("buy_", "")
+            delete_msg(c_id, m_id)
             if tier == "custom":
                 set_db(u_id, "state", "AWAITING_CUSTOM_STARS")
                 send_msg(c_id, "<b>Custom Payment</b>\n\nReply with Telegram Stars to spend (Minimum: <b>40 Stars</b>).")
-            else: send_invoice(c_id, int(tier))
+            else:
+                send_invoice(c_id, int(tier))
             return jsonify({"status": "ok"}), 200
 
         elif cb_data.startswith("voice_set_"):
-            set_db(u_id, "selected_voice", cb_data.replace("voice_set_", ""))
-            send_msg(c_id, "🎙 <b>Active Voice Updated!</b>\n\nAll future scripts will use this profile:", reply_markup=get_voice_kb(u_id))
+            selected = cb_data.replace("voice_set_", "")
+            set_db(u_id, "selected_voice", selected)
+            edit_msg(c_id, m_id, "🎙 <b>Active Voice Updated!</b>\n\nAll future scripts will use this profile:", reply_markup=get_voice_kb(u_id))
             return jsonify({"status": "ok"}), 200
+
         return jsonify({"status": "ok"}), 200
 
     elif "message" in data:
@@ -195,16 +206,20 @@ def webhook():
 
         if "voice" in msg or "audio" in msg:
             f_obj = msg.get("voice") or msg.get("audio")
-            send_msg(c_id, "⏳ <b>Processing your voice sample...</b>\nPlease wait standard processing time.")
+            status_msg = send_msg(c_id, "⏳ <b>Processing your voice sample...</b>\nPlease wait standard processing time.")
             try:
                 b, mime = download_file(f_obj["file_id"])
                 m_id = clone_voice(b, title=f"user_{u_id}_voice", mime_type=mime)
                 set_db(u_id, "model_id", m_id)
                 set_db(u_id, "selected_voice", "CLONED")
                 set_db(u_id, "state", "IDLE")
+                if status_msg and "result" in status_msg:
+                    delete_msg(c_id, status_msg["result"]["message_id"])
                 send_msg(c_id, "🎉 <b>Your custom voice profile is active & saved permanently!</b>", reply_markup=get_main_kb())
             except Exception as e:
                 print(f"Clone error: {e}")
+                if status_msg and "result" in status_msg:
+                    delete_msg(c_id, status_msg["result"]["message_id"])
                 send_msg(c_id, "❌ <b>Failed to clone voice sample.</b> Record 15-30s in a quiet room.")
             return jsonify({"status": "ok"}), 200
 
@@ -272,8 +287,9 @@ def webhook():
         send_msg(c_id, "❌ <b>Out of credits.</b> Buy more using Telegram Stars.", reply_markup=get_buy_kb())
         return jsonify({"status": "ok"}), 200
 
-    # Status message triggers instantly
-    send_msg(c_id, "⚡ <b>Generating audio...</b> Please wait a few seconds.")
+    # Send processing message & action state
+    send_chat_action(c_id, "record_voice")
+    proc_msg = send_msg(c_id, "⚡ <b>Generating audio...</b> Please wait a few seconds.")
 
     try:
         vid = get_active_voice_id(u_id)
@@ -283,9 +299,12 @@ def webhook():
     except Exception as e:
         print(f"TTS Error: {e}")
         send_msg(c_id, "❌ <b>Voice generation failed.</b> Try again later.")
+    finally:
+        if proc_msg and "result" in proc_msg:
+            delete_msg(c_id, proc_msg["result"]["message_id"])
 
     return jsonify({"status": "ok"}), 200
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
-                          
+    
