@@ -486,4 +486,5 @@ def webhook():
         if user_credits <= 0:
             send_message(
                 chat_id,
-                "❌ *You are out o
+                text = "❌ You are out of credits."
+                
