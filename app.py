@@ -11,11 +11,12 @@ UPSTASH_REDIS_REST_URL = (os.getenv("UPSTASH_REDIS_REST_URL") or "").strip()
 UPSTASH_REDIS_REST_TOKEN = (os.getenv("UPSTASH_REDIS_REST_TOKEN") or "").strip()
 TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
 
+# Default engine keys mapped to friendly display labels
 DEFAULT_VOICES = {
-    "voice_adrian": "7f902a0a29f848f08f02f893d5b0a701",
-    "voice_selene": "8a123b0a29f848f08f02f893d5b0a702",
-    "voice_ethan": "9b234c0a29f848f08f02f893d5b0a703",
-    "voice_sarah": "0c345d0a29f848f08f02f893d5b0a704"
+    "voice_adrian": "Adrian (Deep Male)",
+    "voice_selene": "Selene (Female Storyteller)",
+    "voice_ethan": "Ethan (Professional Male)",
+    "voice_sarah": "Sarah (Energetic Female)"
 }
 
 # --- REDIS HELPERS ---
@@ -33,11 +34,14 @@ def get_db(u_id, key, default=None):
 
 def set_db(u_id, key, val): redis_cmd(["SET", f"user:{u_id}:{key}", str(val)])
 
-def get_active_voice_id(u_id: int) -> str:
+def get_active_voice_id(u_id: int):
     selected = get_db(u_id, "selected_voice", "CLONED")
-    if selected in DEFAULT_VOICES: return DEFAULT_VOICES[selected]
-    cloned = get_db(u_id, "model_id")
-    return str(cloned) if cloned else DEFAULT_VOICES["voice_adrian"]
+    if selected == "CLONED":
+        cloned = get_db(u_id, "model_id")
+        if cloned:
+            return str(cloned)
+    # Return None for standard preset voices to utilize Fish Audio base engine safely
+    return None
 
 def get_user_credits(u_id: int) -> int:
     val = get_db(u_id, "credits")
@@ -136,16 +140,14 @@ def get_buy_kb():
     return {"inline_keyboard": [[{"text": "⭐ 40 Stars (19 Credits)", "callback_data": "buy_40"}],
                                 [{"text": "⭐ 100 Stars (57 Credits)", "callback_data": "buy_100"}],
                                 [{"text": "⭐ 250 Stars (152 Credits)", "callback_data": "buy_250"}],
-                                [{"text": "✏️ Enter Custom Amount", "callback_data": "buy_custom"}]]}
+                                [{"text": "✏️️ Enter Custom Amount", "callback_data": "buy_custom"}]]}
 
 def get_voice_kb(u_id: int):
     curr = get_db(u_id, "selected_voice", "CLONED")
     btn = []
     if get_db(u_id, "model_id"):
         btn.append([{"text": f"{'✅ ' if curr == 'CLONED' else '🎙 '}My Custom Cloned Voice", "callback_data": "voice_set_CLONED"}])
-    defaults = [("voice_adrian", "Adrian (Deep Male)"), ("voice_selene", "Selene (Female Storyteller)"),
-                ("voice_ethan", "Ethan (Professional Male)"), ("voice_sarah", "Sarah (Energetic Female)")]
-    for k, v in defaults:
+    for k, v in DEFAULT_VOICES.items():
         btn.append([{"text": f"{'✅ ' if curr == k else ''}🎙 {v}", "callback_data": f"voice_set_{k}"}])
     return {"inline_keyboard": btn}
 
@@ -178,7 +180,7 @@ def webhook():
             set_db(u_id, "selected_voice", cb_data.replace("voice_set_", ""))
             send_msg(c_id, "🎙 <b>Active Voice Updated!</b>\n\nAll future scripts will use this profile:", reply_markup=get_voice_kb(u_id))
             return jsonify({"status": "ok"}), 200
-        raw_text = cb_data
+        return jsonify({"status": "ok"}), 200
 
     elif "message" in data:
         msg = data["message"]
@@ -270,7 +272,9 @@ def webhook():
         send_msg(c_id, "❌ <b>Out of credits.</b> Buy more using Telegram Stars.", reply_markup=get_buy_kb())
         return jsonify({"status": "ok"}), 200
 
-    send_msg(c_id, "⚡ <b>Generating audio...</b>")
+    # Status message triggers instantly
+    send_msg(c_id, "⚡ <b>Generating audio...</b> Please wait a few seconds.")
+
     try:
         vid = get_active_voice_id(u_id)
         audio = generate_voice(prepare_text(raw_text), ref_id=vid)
@@ -284,4 +288,4 @@ def webhook():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
-    
+                          
