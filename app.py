@@ -2,6 +2,7 @@ import os
 import re
 import io
 import time
+import html
 import requests
 from flask import Flask, request, jsonify
 
@@ -117,7 +118,7 @@ def prepare_text_for_tts(text: str) -> str:
     # 3. Clean up excess whitespace
     text = re.sub(r'\s+', ' ', text).strip()
     
-    # 4. Remove unsupported symbols
+    # 4. Filter unsupported characters while preserving words and punctuation
     text = re.sub(r'[^\w\s.,!?\'"]', '', text)
     
     return text
@@ -199,9 +200,11 @@ def generate_voice_fish_audio(text: str, reference_id: str = None) -> bytes:
 
 
 # --- TELEGRAM API HELPERS ---
-def send_message(chat_id: int, text: str, reply_markup: dict = None):
+def send_message(chat_id: int, text: str, reply_markup: dict = None, parse_mode: str = "HTML"):
     url = f"{TELEGRAM_API_URL}/sendMessage"
-    payload = {"chat_id": chat_id, "text": text, "parse_mode": "Markdown"}
+    payload = {"chat_id": chat_id, "text": text}
+    if parse_mode:
+        payload["parse_mode"] = parse_mode
     if reply_markup:
         payload["reply_markup"] = reply_markup
     res = requests.post(url, json=payload, timeout=10)
@@ -320,7 +323,7 @@ def webhook():
                 set_user_state(user_id, "AWAITING_CUSTOM_STARS")
                 send_message(
                     chat_id, 
-                    "💬 *Custom Payment*\n\nPlease reply with the number of Telegram Stars you would like to spend (Minimum: **40 Stars**)."
+                    "<b>Custom Payment</b>\n\nPlease reply with the number of Telegram Stars you would like to spend (Minimum: <b>40 Stars</b>)."
                 )
             else:
                 send_stars_invoice(chat_id, int(tier))
@@ -333,7 +336,7 @@ def webhook():
             
             send_message(
                 chat_id,
-                "🎙 *Active Voice Updated!*\n\nAll your future script voiceovers will be generated using this active profile:",
+                "🎙 <b>Active Voice Updated!</b>\n\nAll your future script voiceovers will be generated using this active profile:",
                 reply_markup=get_voice_settings_keyboard(user_id)
             )
             return jsonify({"status": "ok"}), 200
@@ -355,12 +358,12 @@ def webhook():
                 added = credits_map.get(payload, 19)
 
             add_credits(user_id, added)
-            send_message(chat_id, f"🎉 Payment Received! *{added} Premium Credits* added to your balance.", reply_markup=get_main_keyboard())
+            send_message(chat_id, f"🎉 Payment Received! <b>{added} Premium Credits</b> added to your balance.", reply_markup=get_main_keyboard())
             return jsonify({"status": "ok"}), 200
 
         if "voice" in message or "audio" in message:
             file_obj = message.get("voice") or message.get("audio")
-            send_message(chat_id, "⏳ *Processing your voice sample...*\nPlease wait a moment while we clone your voice.")
+            send_message(chat_id, "⏳ <b>Processing your voice sample...</b>\nPlease wait a moment while we clone your voice.")
             try:
                 audio_bytes, mime_type = download_telegram_file(file_obj["file_id"])
                 model_id = clone_voice_fish_audio(audio_bytes, title=f"user_{user_id}_voice", mime_type=mime_type)
@@ -370,13 +373,13 @@ def webhook():
                 set_user_state(user_id, "IDLE")
                 
                 success_msg = (
-                    "🎉 *Your custom voice profile is active & saved permanently!*\n\n"
+                    "🎉 <b>Your custom voice profile is active & saved permanently!</b>\n\n"
                     "Send any text script (up to 300 words) and I will bring it to life in your exact voice!"
                 )
                 send_message(chat_id, success_msg, reply_markup=get_main_keyboard())
             except Exception as e:
                 print(f"Voice cloning error: {e}")
-                send_message(chat_id, "❌ *Failed to clone voice sample.* Please make sure your recording is **at least 15-20 seconds long** in a quiet room.")
+                send_message(chat_id, "❌ <b>Failed to clone voice sample.</b> Please make sure your recording is <b>at least 15-20 seconds long</b> in a quiet room.")
             return jsonify({"status": "ok"}), 200
 
         raw_text = message.get("text", "").strip()
@@ -394,7 +397,7 @@ def webhook():
         if raw_text.isdigit():
             star_val = int(raw_text)
             if star_val < 40:
-                send_message(chat_id, "⚠️ Minimum amount is **40 Stars**. Please enter 40 or higher:")
+                send_message(chat_id, "⚠️ Minimum amount is <b>40 Stars</b>. Please enter 40 or higher:")
                 return jsonify({"status": "ok"}), 200
             
             set_user_state(user_id, "IDLE")
@@ -408,15 +411,15 @@ def webhook():
         get_user_credits(user_id)
         
         welcome_text = (
-            "🎙 **Turn Written Ideas Into Studio-Grade Voiceovers—In Seconds.**\n\n"
+            "🎙 <b>Turn Written Ideas Into Studio-Grade Voiceovers—In Seconds.</b>\n\n"
             "Clone your own voice with 99% accuracy or deploy studio AI voice actors for your Telegram channels, TikToks, and podcasts.\n\n"
-            "⚡ **What You Get Today:**\n"
-            "• **3 Free Studio Generations** ready on your account.\n"
-            "• **Instant Voice Cloning:** Send a 15s voice note to unlock your digital twin.\n"
-            "• **Multi-Voice Studio:** Switch between your cloned voice and standard AI narrators seamlessly.\n"
-            "• **Zero Rendering Delay:** Render full 300-word audio scripts delivered in seconds.\n\n"
-            "🎁 *Daily Balance Refill:* 2 Free generations refreshed every 24 hours.\n\n"
-            "👇 **Tap '🎙 Clone My Voice' below or pick a preset voice in '🎧 Voice Settings':**"
+            "⚡ <b>What You Get Today:</b>\n"
+            "• <b>3 Free Studio Generations</b> ready on your account.\n"
+            "• <b>Instant Voice Cloning:</b> Send a 15s voice note to unlock your digital twin.\n"
+            "• <b>Multi-Voice Studio:</b> Switch between your cloned voice and standard AI narrators seamlessly.\n"
+            "• <b>Zero Rendering Delay:</b> Render full 300-word audio scripts delivered in seconds.\n\n"
+            "🎁 <i>Daily Balance Refill:</i> 2 Free generations refreshed every 24 hours.\n\n"
+            "👇 <b>Tap '🎙 Clone My Voice' below or pick a preset voice in '🎧 Voice Settings':</b>"
         )
         send_message(chat_id, welcome_text, reply_markup=get_main_keyboard())
         return jsonify({"status": "ok"}), 200
@@ -424,11 +427,11 @@ def webhook():
     if "clone my voice" in clean_btn_text:
         set_user_state(user_id, "AWAITING_VOICE")
         instructions = (
-            "🎙 *Voice Cloning Instructions:*\n\n"
-            "• *Environment:* Quiet room with zero background noise.\n"
-            "• *Duration:* Record a clear **15 to 30 second** voice note.\n"
-            "• *Tip:* Speak naturally at a steady, clear pace.\n\n"
-            "👇 *Press the microphone button below to send your voice note now:*"
+            "🎙 <b>Voice Cloning Instructions:</b>\n\n"
+            "• <i>Environment:</i> Quiet room with zero background noise.\n"
+            "• <i>Duration:</i> Record a clear <b>15 to 30 second</b> voice note.\n"
+            "• <i>Tip:</i> Speak naturally at a steady, clear pace.\n\n"
+            "👇 <b>Press the microphone button below to send your voice note now:</b>"
         )
         send_message(chat_id, instructions)
         return jsonify({"status": "ok"}), 200
@@ -436,13 +439,13 @@ def webhook():
     if "voice settings" in clean_btn_text:
         send_message(
             chat_id,
-            "🎧 *Voice Studio Selection:*\n\nChoose whether you want to generate scripts using your **custom cloned voice** or select one of our default AI studio actors:",
+            "🎧 <b>Voice Studio Selection:</b>\n\nChoose whether you want to generate scripts using your <b>custom cloned voice</b> or select one of our default AI studio actors:",
             reply_markup=get_voice_settings_keyboard(user_id)
         )
         return jsonify({"status": "ok"}), 200
 
     if "buy credits" in clean_btn_text or raw_text == "/buy":
-        buy_text = "💳 *Select a Credit Package or Enter Custom Stars:*\n\nChoose an option below:"
+        buy_text = "💳 <b>Select a Credit Package or Enter Custom Stars:</b>\n\nChoose an option below:"
         send_message(chat_id, buy_text, reply_markup=get_buy_inline_keyboard())
         return jsonify({"status": "ok"}), 200
 
@@ -451,22 +454,27 @@ def webhook():
         user_model = get_user_model(user_id)
         active_voice = get_user_selected_voice(user_id)
         
+        admin_flag = "Admin Account Status" if is_admin else "User Status"
+        cloned_flag = "✅ Active & Saved" if user_model else "❌ Not Cloned Yet"
+        balance_flag = "Unlimited" if is_admin else f"{user_credits} Credits Remaining"
+        tier_flag = "System Administrator" if is_admin else "Standard Tier"
+        
         status_text = (
-            f"👑 *{'Admin Account Status' if is_admin else 'User Status'}*\n\n"
-            f"🎙 Cloned Voice Profile: {'✅ Active & Saved' if user_model else '❌ Not Cloned Yet'}\n"
-            f"🎧 Active Voice Engine: `{active_voice.upper()}`\n"
-            f"🪙 Credits Balance: {'Unlimited' if is_admin else f'{user_credits} Credits Remaining'}\n"
-            f"⚡ Access Tier: {'System Administrator' if is_admin else 'Standard Tier'}"
+            f"👑 <b>{admin_flag}</b>\n\n"
+            f"🎙 Cloned Voice Profile: {cloned_flag}\n"
+            f"🎧 Active Voice Engine: <code>{html.escape(active_voice.upper())}</code>\n"
+            f"🪙 Credits Balance: {balance_flag}\n"
+            f"⚡ Access Tier: {tier_flag}"
         )
         send_message(chat_id, status_text, reply_markup=get_main_keyboard())
         return jsonify({"status": "ok"}), 200
 
     if "storytelling tips" in clean_btn_text:
         tips_text = (
-            "💡 *Storytelling & Social Media Tips:*\n\n"
-            "1. *Hooks:* Keep the first 3 seconds exciting!\n"
-            "2. *Punctuation:* Use commas and periods to guide natural pauses.\n"
-            "3. *Visuals:* Pair your generated audio with book quotes or aesthetic video loops!"
+            "💡 <b>Storytelling & Social Media Tips:</b>\n\n"
+            "1. <i>Hooks:</i> Keep the first 3 seconds exciting!\n"
+            "2. <i>Punctuation:</i> Use commas and periods to guide natural pauses.\n"
+            "3. <i>Visuals:</i> Pair your generated audio with book quotes or aesthetic video loops!"
         )
         send_message(chat_id, tips_text, reply_markup=get_main_keyboard())
         return jsonify({"status": "ok"}), 200
@@ -474,17 +482,5 @@ def webhook():
     # TTS Generation Router
     words = raw_text.split()
     if len(words) > 300:
-        send_message(chat_id, f"⚠ *Script too long!* Your text contains {len(words)} words. The maximum limit is 300 words per generation.")
-        return jsonify({"status": "ok"}), 200
-
-    if not is_admin:
-        user_credits = get_user_credits(user_id)
-        if user_credits <= 0:
-            send_message(
-                chat_id,
-                "❌ *You are out of credits.*\n\nPlease buy more credits using Telegram Stars to continue generating voiceovers.",
-                reply_markup=get_buy_inline_keyboard()
-            )
-            return jsonify({"status": "ok"}), 200
-
-    sen
+        send_message(chat_id, f"⚠ <b>Script too long!</b> Your text contains {len(words)} words. The maximum limit is 300 words per generation.")
+        return jsonify({"status": "ok"}),
