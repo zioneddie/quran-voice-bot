@@ -410,7 +410,7 @@ def webhook():
     if raw_text in ["/start", "i Help", "Help"] or clean_btn_text in ["start", "help"]:
         get_user_credits(user_id)
         
-        # --- MIND-BLOWING HIGH CONVERSION WELCOME COPY ---
+        # --- WELCOME MESSAGE ---
         welcome_text = (
             "🎙 **Turn Written Ideas Into Studio-Grade Voiceovers—In Seconds.**\n\n"
             "Clone your own voice with 99% accuracy or deploy studio AI voice actors for your Telegram channels, TikToks, and podcasts.\n\n"
@@ -478,7 +478,7 @@ def webhook():
     # TTS Generation Router
     words = raw_text.split()
     if len(words) > 300:
-        send_message(chat_id, f"⚠️ *Script too long!* Your text contains {len(words)} words. The maximum limit is 300 words per generation.")
+        send_message(chat_id, f"⚠️️ *Script too long!* Your text contains {len(words)} words. The maximum limit is 300 words per generation.")
         return jsonify({"status": "ok"}), 200
 
     if not is_admin:
@@ -486,5 +486,4 @@ def webhook():
         if user_credits <= 0:
             send_message(
                 chat_id,
-                text = "❌ You are out of credits."
-                
+                "❌ *You are out of credits.*\n\nPlease buy
