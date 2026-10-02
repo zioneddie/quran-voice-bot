@@ -117,7 +117,7 @@ def prepare_text_for_tts(text: str) -> str:
     # 3. Clean up excess whitespace
     text = re.sub(r'\s+', ' ', text).strip()
     
-    # 4. Remove unsupported weird symbols that break TTS models
+    # 4. Remove unsupported symbols
     text = re.sub(r'[^\w\s.,!?\'"]', '', text)
     
     return text
@@ -279,12 +279,10 @@ def get_voice_settings_keyboard(user_id: int):
     
     buttons = []
     
-    # Show cloned voice option if user has uploaded a clone
     if cloned_id:
         cloned_label = "✅ My Custom Cloned Voice" if current == "CLONED" else "🎙 My Custom Cloned Voice"
         buttons.append([{"text": cloned_label, "callback_data": "voice_set_CLONED"}])
 
-    # Default Studio Voice Actors
     buttons.extend([
         [{"text": f"{'✅ ' if current == 'voice_adrian' else ''}🎙 Adrian (Deep Male Narrator)", "callback_data": "voice_set_voice_adrian"}],
         [{"text": f"{'✅ ' if current == 'voice_selene' else ''}🎙 Selene (Female Storyteller)", "callback_data": "voice_set_voice_selene"}],
@@ -333,7 +331,6 @@ def webhook():
             set_user_selected_voice(user_id, selected_key)
             answer_callback_query(cb["id"], text="Voice updated successfully!")
             
-            # Send updated settings menu
             send_message(
                 chat_id,
                 "🎙 *Active Voice Updated!*\n\nAll your future script voiceovers will be generated using this active profile:",
@@ -410,7 +407,6 @@ def webhook():
     if raw_text in ["/start", "i Help", "Help"] or clean_btn_text in ["start", "help"]:
         get_user_credits(user_id)
         
-        # --- WELCOME MESSAGE ---
         welcome_text = (
             "🎙 **Turn Written Ideas Into Studio-Grade Voiceovers—In Seconds.**\n\n"
             "Clone your own voice with 99% accuracy or deploy studio AI voice actors for your Telegram channels, TikToks, and podcasts.\n\n"
@@ -478,7 +474,7 @@ def webhook():
     # TTS Generation Router
     words = raw_text.split()
     if len(words) > 300:
-        send_message(chat_id, f"⚠️️ *Script too long!* Your text contains {len(words)} words. The maximum limit is 300 words per generation.")
+        send_message(chat_id, f"⚠ *Script too long!* Your text contains {len(words)} words. The maximum limit is 300 words per generation.")
         return jsonify({"status": "ok"}), 200
 
     if not is_admin:
@@ -486,4 +482,9 @@ def webhook():
         if user_credits <= 0:
             send_message(
                 chat_id,
-                "❌ *You are out of credits.*\n\nPlease buy
+                "❌ *You are out of credits.*\n\nPlease buy more credits using Telegram Stars to continue generating voiceovers.",
+                reply_markup=get_buy_inline_keyboard()
+            )
+            return jsonify({"status": "ok"}), 200
+
+    sen
