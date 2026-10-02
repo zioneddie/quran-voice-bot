@@ -309,6 +309,8 @@ def webhook():
 
     raw_text = ""
     message = None
+    chat_id = None
+    user_id = None
     
     if "callback_query" in data:
         cb = data["callback_query"]
@@ -384,6 +386,9 @@ def webhook():
 
         raw_text = message.get("text", "").strip()
     else:
+        return jsonify({"status": "ignored"}), 200
+
+    if not chat_id or not user_id:
         return jsonify({"status": "ignored"}), 200
 
     is_admin = str(user_id) == str(ADMIN_ID)
@@ -482,5 +487,4 @@ def webhook():
     # TTS Generation Router
     words = raw_text.split()
     if len(words) > 300:
-        send_message(chat_id, f"⚠ <b>Script too long!</b> Your text contains {len(words)} words. The maximum limit is 300 words per generation.")
-        return jsonify({"status": "ok"}),
+        send_message(chat_id, f"⚠ <b>Script too long!</b> Your
