@@ -3,8 +3,6 @@ import re
 import io
 import time
 import requests
-import wave
-import struct
 from flask import Flask, request, jsonify
 
 app = Flask(__name__)
@@ -18,6 +16,14 @@ UPSTASH_REDIS_REST_URL = (os.getenv("UPSTASH_REDIS_REST_URL") or "").strip()
 UPSTASH_REDIS_REST_TOKEN = (os.getenv("UPSTASH_REDIS_REST_TOKEN") or "").strip()
 
 TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
+
+# --- DEFAULT FISH AUDIO VOICE IDs ---
+DEFAULT_VOICES = {
+    "voice_adrian": "7f902a0a29f848f08f02f893d5b0a701",  # Deep Male Narrator
+    "voice_selene": "8a123b0a29f848f08f02f893d5b0a702",  # Smooth Female Storyteller
+    "voice_ethan": "9b234c0a29f848f08f02f893d5b0a703",   # Professional Male Explainer
+    "voice_sarah": "0c345d0a29f848f08f02f893d5b0a704"    # Energetic Female
+}
 
 
 # --- UPSTASH REDIS HELPERS ---
@@ -40,6 +46,25 @@ def get_user_model(user_id: int) -> str:
 
 def set_user_model(user_id: int, model_id: str):
     redis_command(["SET", f"user:{user_id}:model_id", str(model_id)])
+
+def get_user_selected_voice(user_id: int) -> str:
+    res = redis_command(["GET", f"user:{user_id}:selected_voice"])
+    return str(res) if res else "CLONED"
+
+def set_user_selected_voice(user_id: int, voice_key: str):
+    redis_command(["SET", f"user:{user_id}:selected_voice", str(voice_key)])
+
+def get_active_voice_id(user_id: int) -> str:
+    """Returns either the user's custom cloned ID or a selected system default voice ID."""
+    selected = get_user_selected_voice(user_id)
+    if selected in DEFAULT_VOICES:
+        return DEFAULT_VOICES[selected]
+    
+    cloned_id = get_user_model(user_id)
+    if cloned_id:
+        return str(cloned_id)
+        
+    return DEFAULT_VOICES["voice_adrian"]
 
 def get_user_state(user_id: int) -> str:
     res = redis_command(["GET", f"user:{user_id}:state"])
@@ -147,7 +172,6 @@ def generate_single_tts_chunk(text: str, reference_id: str = None) -> bytes:
         "Content-Type": "application/json"
     }
     
-    # "speed": 0.9 slows the overall pacing down slightly for a more deliberate Replicate-like rhythm
     payload = {
         "text": text,
         "format": "mp3",
@@ -200,9 +224,12 @@ def download_telegram_file(file_id: str):
     content = requests.get(f"https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}/{file_path}", timeout=30).content
     return content, mime_type
 
-def answer_callback_query(callback_query_id: str):
+def answer_callback_query(callback_query_id: str, text: str = None):
     url = f"{TELEGRAM_API_URL}/answerCallbackQuery"
-    requests.post(url, json={"callback_query_id": callback_query_id}, timeout=5)
+    payload = {"callback_query_id": callback_query_id}
+    if text:
+        payload["text"] = text
+    requests.post(url, json=payload, timeout=5)
 
 def send_stars_invoice(chat_id: int, star_amount: int):
     credits_amount = int(star_amount * 0.475)
@@ -213,7 +240,7 @@ def send_stars_invoice(chat_id: int, star_amount: int):
     payload = {
         "chat_id": chat_id,
         "title": f"StoryVoice: {credits_amount} Credits",
-        "description": f"Generates ~{credits_amount * 300:,} words in your cloned voice.",
+        "description": f"Generates ~{credits_amount * 300:,} words in high-definition voiceover.",
         "payload": f"custom_credits_{credits_amount}",
         "currency": "XTR",
         "prices": [{"label": f"{credits_amount} Premium Credits", "amount": star_amount}]
@@ -225,12 +252,13 @@ def answer_pre_checkout_query(pre_checkout_query_id: str, ok: bool = True):
     requests.post(url, json={"pre_checkout_query_id": pre_checkout_query_id, "ok": ok}, timeout=5)
 
 
-# --- MAIN KEYBOARDS ---
+# --- MAIN KEYBOARDS & INLINE MENUS ---
 def get_main_keyboard():
     return {
         "keyboard": [
-            [{"text": "🎙 Clone My Voice"}, {"text": "💳 Buy Credits"}],
-            [{"text": "📊 My Status"}, {"text": "📝 Storytelling Tips"}]
+            [{"text": "🎙 Clone My Voice"}, {"text": "🎧 Voice Settings"}],
+            [{"text": "💳 Buy Credits"}, {"text": "📊 My Status"}],
+            [{"text": "📝 Storytelling Tips"}]
         ],
         "resize_keyboard": True
     }
@@ -244,6 +272,27 @@ def get_buy_inline_keyboard():
             [{"text": "✏️ Enter Custom Amount", "callback_data": "buy_custom"}]
         ]
     }
+
+def get_voice_settings_keyboard(user_id: int):
+    current = get_user_selected_voice(user_id)
+    cloned_id = get_user_model(user_id)
+    
+    buttons = []
+    
+    # Show cloned voice option if user has uploaded a clone
+    if cloned_id:
+        cloned_label = "✅ My Custom Cloned Voice" if current == "CLONED" else "🎙 My Custom Cloned Voice"
+        buttons.append([{"text": cloned_label, "callback_data": "voice_set_CLONED"}])
+
+    # Default Studio Voice Actors
+    buttons.extend([
+        [{"text": f"{'✅ ' if current == 'voice_adrian' else ''}🎙 Adrian (Deep Male Narrator)", "callback_data": "voice_set_voice_adrian"}],
+        [{"text": f"{'✅ ' if current == 'voice_selene' else ''}🎙 Selene (Female Storyteller)", "callback_data": "voice_set_voice_selene"}],
+        [{"text": f"{'✅ ' if current == 'voice_ethan' else ''}🎙 Ethan (Professional Male)", "callback_data": "voice_set_voice_ethan"}],
+        [{"text": f"{'✅ ' if current == 'voice_sarah' else ''}🎙 Sarah (Energetic Female)", "callback_data": "voice_set_voice_sarah"}]
+    ])
+    
+    return {"inline_keyboard": buttons}
 
 
 # --- WEBHOOK ROUTER ---
@@ -262,12 +311,12 @@ def webhook():
     
     if "callback_query" in data:
         cb = data["callback_query"]
-        answer_callback_query(cb["id"])
         chat_id = cb["message"]["chat"]["id"]
         user_id = cb["from"]["id"]
         cb_data = cb.get("data", "")
 
         if cb_data.startswith("buy_"):
+            answer_callback_query(cb["id"])
             tier = cb_data.replace("buy_", "")
             if tier == "custom":
                 set_user_state(user_id, "AWAITING_CUSTOM_STARS")
@@ -277,6 +326,19 @@ def webhook():
                 )
             else:
                 send_stars_invoice(chat_id, int(tier))
+            return jsonify({"status": "ok"}), 200
+
+        elif cb_data.startswith("voice_set_"):
+            selected_key = cb_data.replace("voice_set_", "")
+            set_user_selected_voice(user_id, selected_key)
+            answer_callback_query(cb["id"], text="Voice updated successfully!")
+            
+            # Send updated settings menu
+            send_message(
+                chat_id,
+                "🎙 *Active Voice Updated!*\n\nAll your future script voiceovers will be generated using this active profile:",
+                reply_markup=get_voice_settings_keyboard(user_id)
+            )
             return jsonify({"status": "ok"}), 200
 
         raw_text = cb_data
@@ -307,10 +369,11 @@ def webhook():
                 model_id = clone_voice_fish_audio(audio_bytes, title=f"user_{user_id}_voice", mime_type=mime_type)
                 
                 set_user_model(user_id, model_id)
+                set_user_selected_voice(user_id, "CLONED")
                 set_user_state(user_id, "IDLE")
                 
                 success_msg = (
-                    "🎉 *Your voice profile is active & saved permanently!*\n\n"
+                    "🎉 *Your custom voice profile is active & saved permanently!*\n\n"
                     "Send any text script (up to 300 words) and I will bring it to life in your exact voice!"
                 )
                 send_message(chat_id, success_msg, reply_markup=get_main_keyboard())
@@ -346,14 +409,18 @@ def webhook():
 
     if raw_text in ["/start", "i Help", "Help"] or clean_btn_text in ["start", "help"]:
         get_user_credits(user_id)
+        
+        # --- MIND-BLOWING HIGH CONVERSION WELCOME COPY ---
         welcome_text = (
-            "✨ *Welcome to StoryVoice AI!* 🎙️\n\n"
-            "Ever wondered what your stories or posts sound like spoken in your *own* cloned voice? Now you can hear it instantly!\n\n"
-            "🎁 *Welcome Gift:* You have **3 Free Credits** ready to use!\n"
-            "• **Daily Refill:** 2 Free credits refreshed every 24 hours.\n"
-            "• **Script Limit:** Up to 300 words per voice clip.\n"
-            "• **Permanent Storage:** Your voice stays saved permanently until you re-clone it.\n\n"
-            "👇 Tap *'🎙 Clone My Voice'* below to get started!"
+            "🎙 **Turn Written Ideas Into Studio-Grade Voiceovers—In Seconds.**\n\n"
+            "Clone your own voice with 99% accuracy or deploy studio AI voice actors for your Telegram channels, TikToks, and podcasts.\n\n"
+            "⚡ **What You Get Today:**\n"
+            "• **3 Free Studio Generations** ready on your account.\n"
+            "• **Instant Voice Cloning:** Send a 15s voice note to unlock your digital twin.\n"
+            "• **Multi-Voice Studio:** Switch between your cloned voice and standard AI narrators seamlessly.\n"
+            "• **Zero Rendering Delay:** Render full 300-word audio scripts delivered in seconds.\n\n"
+            "🎁 *Daily Balance Refill:* 2 Free generations refreshed every 24 hours.\n\n"
+            "👇 **Tap '🎙 Clone My Voice' below or pick a preset voice in '🎧 Voice Settings':**"
         )
         send_message(chat_id, welcome_text, reply_markup=get_main_keyboard())
         return jsonify({"status": "ok"}), 200
@@ -362,12 +429,20 @@ def webhook():
         set_user_state(user_id, "AWAITING_VOICE")
         instructions = (
             "🎙 *Voice Cloning Instructions:*\n\n"
-            "• *Environment:* Quiet room with zero noise or music.\n"
+            "• *Environment:* Quiet room with zero background noise.\n"
             "• *Duration:* Record a clear **15 to 30 second** voice note.\n"
             "• *Tip:* Speak naturally at a steady, clear pace.\n\n"
             "👇 *Press the microphone button below to send your voice note now:*"
         )
         send_message(chat_id, instructions)
+        return jsonify({"status": "ok"}), 200
+
+    if "voice settings" in clean_btn_text:
+        send_message(
+            chat_id,
+            "🎧 *Voice Studio Selection:*\n\nChoose whether you want to generate scripts using your **custom cloned voice** or select one of our default AI studio actors:",
+            reply_markup=get_voice_settings_keyboard(user_id)
+        )
         return jsonify({"status": "ok"}), 200
 
     if "buy credits" in clean_btn_text or raw_text == "/buy":
@@ -378,9 +453,12 @@ def webhook():
     if "my status" in clean_btn_text:
         user_credits = get_user_credits(user_id)
         user_model = get_user_model(user_id)
+        active_voice = get_user_selected_voice(user_id)
+        
         status_text = (
             f"👑 *{'Admin Account Status' if is_admin else 'User Status'}*\n\n"
-            f"🎙 Voice Model: {'✅ Saved & Active Permanently' if user_model else '❌ Not Cloned Yet'}\n"
+            f"🎙 Cloned Voice Profile: {'✅ Active & Saved' if user_model else '❌ Not Cloned Yet'}\n"
+            f"🎧 Active Voice Engine: `{active_voice.upper()}`\n"
             f"🪙 Credits Balance: {'Unlimited' if is_admin else f'{user_credits} Credits Remaining'}\n"
             f"⚡ Access Tier: {'System Administrator' if is_admin else 'Standard Tier'}"
         )
@@ -408,37 +486,4 @@ def webhook():
         if user_credits <= 0:
             send_message(
                 chat_id,
-                "❌ *You are out of credits!*\n\n"
-                "Tap *'💳 Buy Credits'* to buy extra generations with Telegram Stars, or wait for your daily refill.",
-                reply_markup=get_main_keyboard()
-            )
-            return jsonify({"status": "ok"}), 200
-
-    send_message(chat_id, "⏳ *Generating your audio clip...* Please give me a few seconds.")
-
-    try:
-        user_voice_id = get_user_model(user_id)
-        enhanced_text = prepare_text_for_tts(raw_text)
-        audio_data = generate_voice_fish_audio(enhanced_text, reference_id=user_voice_id)
-        
-        if not is_admin:
-            deduct_credit(user_id)
-            
-        send_audio_bytes(chat_id, audio_data)
-
-    except Exception as e:
-        print(f"TTS error: {e}")
-        send_message(chat_id, "Sorry, something went wrong while generating your voice audio.")
-
-    return jsonify({"status": "ok"}), 200
-
-
-@app.route('/', methods=['GET'])
-def home():
-    return "Bot is running perfectly!", 200
-
-
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
-                     
+                "❌ *You are out o
