@@ -1,4 +1,4 @@
-import os, re, io, time, html, requests
+import os, re, io, time, html, requests, threading
 from flask import Flask, request, jsonify
 
 app = Flask(__name__)
@@ -100,7 +100,7 @@ def generate_voice(text: str, ref_id: str = None) -> bytes:
 # --- TELEGRAM API HELPERS ---
 def tg_req(method: str, payload: dict = None, files: dict = None, data: dict = None):
     url = f"{TELEGRAM_API_URL}/{method}"
-    if files: return requests.post(url, data=data, files=files, timeout=40).json()
+    if files: return requests.post(url, data=data, files=files, timeout=60).json()
     return requests.post(url, json=payload or {}, timeout=10).json()
 
 def send_msg(c_id, text, reply_markup=None):
@@ -157,6 +157,36 @@ def get_voice_kb(u_id: int):
         btn.append([{"text": f"{'✅ ' if curr == k else ''}🎙 {v}", "callback_data": f"voice_set_{k}"}])
     return {"inline_keyboard": btn}
 
+# --- ASYNC WORKERS ---
+def async_generate_tts(c_id, u_id, raw_text, is_admin, proc_msg_id):
+    try:
+        send_chat_action(c_id, "record_voice")
+        vid = get_active_voice_id(u_id)
+        audio = generate_voice(prepare_text(raw_text), ref_id=vid)
+        send_audio(c_id, audio)
+        if not is_admin: deduct_credit(u_id)
+    except Exception as e:
+        print(f"TTS Error: {e}")
+        send_msg(c_id, "❌ <b>Voice generation failed.</b> Try again later.")
+    finally:
+        if proc_msg_id:
+            delete_msg(c_id, proc_msg_id)
+
+def async_process_voice_clone(c_id, u_id, file_id, status_msg_id):
+    try:
+        b, mime = download_file(file_id)
+        m_id = clone_voice(b, title=f"user_{u_id}_voice", mime=mime)
+        set_db(u_id, "model_id", m_id)
+        set_db(u_id, "selected_voice", "CLONED")
+        set_db(u_id, "state", "IDLE")
+        send_msg(c_id, "🎉 <b>Your custom voice profile is active & saved permanently!</b>", reply_markup=get_main_kb())
+    except Exception as e:
+        print(f"Clone error: {e}")
+        send_msg(c_id, "❌ <b>Failed to clone voice sample.</b> Record 15-30s in a quiet room.")
+    finally:
+        if status_msg_id:
+            delete_msg(c_id, status_msg_id)
+
 # --- ROUTER ---
 @app.route('/webhook', methods=['POST'])
 def webhook():
@@ -206,21 +236,11 @@ def webhook():
 
         if "voice" in msg or "audio" in msg:
             f_obj = msg.get("voice") or msg.get("audio")
-            status_msg = send_msg(c_id, "⏳ <b>Processing your voice sample...</b>\nPlease wait standard processing time.")
-            try:
-                b, mime = download_file(f_obj["file_id"])
-                m_id = clone_voice(b, title=f"user_{u_id}_voice", mime_type=mime)
-                set_db(u_id, "model_id", m_id)
-                set_db(u_id, "selected_voice", "CLONED")
-                set_db(u_id, "state", "IDLE")
-                if status_msg and "result" in status_msg:
-                    delete_msg(c_id, status_msg["result"]["message_id"])
-                send_msg(c_id, "🎉 <b>Your custom voice profile is active & saved permanently!</b>", reply_markup=get_main_kb())
-            except Exception as e:
-                print(f"Clone error: {e}")
-                if status_msg and "result" in status_msg:
-                    delete_msg(c_id, status_msg["result"]["message_id"])
-                send_msg(c_id, "❌ <b>Failed to clone voice sample.</b> Record 15-30s in a quiet room.")
+            status_res = send_msg(c_id, "⏳ <b>Processing your voice sample...</b>\nPlease wait standard processing time.")
+            status_msg_id = status_res["result"]["message_id"] if status_res and "result" in status_res else None
+            
+            # Spawn background thread for voice cloning
+            threading.Thread(target=async_process_voice_clone, args=(c_id, u_id, f_obj["file_id"], status_msg_id)).start()
             return jsonify({"status": "ok"}), 200
 
         raw_text = msg.get("text", "").strip()
@@ -287,21 +307,12 @@ def webhook():
         send_msg(c_id, "❌ <b>Out of credits.</b> Buy more using Telegram Stars.", reply_markup=get_buy_kb())
         return jsonify({"status": "ok"}), 200
 
-    # Send processing message & action state
-    send_chat_action(c_id, "record_voice")
-    proc_msg = send_msg(c_id, "⚡ <b>Generating audio...</b> Please wait a few seconds.")
+    # Immediate status response
+    proc_res = send_msg(c_id, "⚡ <b>Generating audio...</b> Please wait a few seconds.")
+    proc_msg_id = proc_res["result"]["message_id"] if proc_res and "result" in proc_res else None
 
-    try:
-        vid = get_active_voice_id(u_id)
-        audio = generate_voice(prepare_text(raw_text), ref_id=vid)
-        send_audio(c_id, audio)
-        if not is_admin: deduct_credit(u_id)
-    except Exception as e:
-        print(f"TTS Error: {e}")
-        send_msg(c_id, "❌ <b>Voice generation failed.</b> Try again later.")
-    finally:
-        if proc_msg and "result" in proc_msg:
-            delete_msg(c_id, proc_msg["result"]["message_id"])
+    # Offload processing to background thread to free Flask/Gunicorn worker immediately
+    threading.Thread(target=async_generate_tts, args=(c_id, u_id, raw_text, is_admin, proc_msg_id)).start()
 
     return jsonify({"status": "ok"}), 200
 
